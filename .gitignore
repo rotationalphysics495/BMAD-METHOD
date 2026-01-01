@@ -34,7 +34,6 @@ Thumbs.db
 _bmad*/.cursor/
 
 # AI assistant files
-CLAUDE.md
 .ai/*
 cursor
 .gemini
