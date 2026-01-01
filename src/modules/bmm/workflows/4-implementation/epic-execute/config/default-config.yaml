@@ -1,0 +1,124 @@
+# Epic Execute Workflow Configuration
+#
+# Copy this file to bmad/_cfg/epic-execute.yaml to customize
+#
+
+# Story Execution Settings
+execution:
+  # Automatically commit after each story completes
+  auto_commit: true
+  
+  # Run tests before transitioning to review phase
+  run_tests_before_review: true
+  
+  # Maximum retries for failed phases
+  max_retries: 2
+  
+  # Timeout per phase in seconds (0 = no timeout)
+  phase_timeout: 0
+
+# Review Settings
+review:
+  # Review strictness: lenient | standard | strict
+  #   lenient  - Only block on missing acceptance criteria
+  #   standard - Block on acceptance criteria, security, major quality
+  #   strict   - Block on any quality issue, no auto-fixing
+  mode: standard
+  
+  # Allow reviewer to auto-fix issues
+  auto_fix_enabled: true
+  
+  # Require all tests pass before approval
+  require_passing_tests: true
+  
+  # Issue fix policy thresholds
+  fix_policy:
+    # Always fix HIGH severity issues
+    always_fix_high: true
+    
+    # Fix MEDIUM severity if total issues exceed this threshold
+    medium_fix_threshold: 5
+    
+    # Never auto-fix LOW severity (just document)
+    fix_low: false
+
+# Context Isolation
+context:
+  # Clear context between phases (recommended)
+  isolate_phases: true
+  
+  # Include architecture doc in dev context
+  include_architecture: true
+  
+  # Include PRD in dev context
+  include_prd: false
+  
+  # Max lines of code context to include
+  max_code_context: 500
+
+# UAT Generation
+uat:
+  # Generate UAT after all stories complete
+  enabled: true
+  
+  # UAT output location (relative to project root)
+  output_dir: docs/uat
+  
+  # Include edge case scenarios
+  include_edge_cases: true
+  
+  # Minimum scenarios to generate
+  min_scenarios: 3
+  
+  # Maximum scenarios to generate
+  max_scenarios: 10
+
+# Git Settings
+git:
+  # Commit message prefix
+  commit_prefix: "feat"
+  
+  # Include epic ID in commit message
+  include_epic_in_commit: true
+  
+  # Push after each commit
+  auto_push: false
+  
+  # Branch naming pattern (use {epic_id} and {story_id} as placeholders)
+  branch_pattern: "feature/epic-{epic_id}"
+
+# Parallel Execution (Experimental)
+parallel:
+  # Enable parallel story execution
+  enabled: false
+  
+  # Maximum concurrent stories
+  max_concurrent: 3
+  
+  # Only parallelize independent stories (no dependencies)
+  respect_dependencies: true
+
+# Logging
+logging:
+  # Log level: debug | info | warn | error
+  level: info
+  
+  # Save execution log
+  save_log: true
+  
+  # Log output location
+  log_dir: docs/sprints
+  
+  # Include Claude responses in log (verbose)
+  log_responses: false
+
+# Notifications (Future)
+notifications:
+  # Notify on completion
+  on_complete: false
+  
+  # Notify on failure
+  on_failure: false
+  
+  # Notification method: slack | email | none
+  method: none

@@ -45,3 +45,11 @@ agent:
     - trigger: CC or fuzzy match on correct-course
       workflow: "{project-root}/_bmad/bmm/workflows/4-implementation/correct-course/workflow.yaml"
       description: "[CC] Execute correct-course task (When implementation is off-track)"
+
+    - trigger: EE or fuzzy match on epic-execute
+      workflow: "{project-root}/_bmad/bmm/workflows/4-implementation/epic-execute/workflow.md"
+      description: "[EE] Execute all stories in an epic sequentially with isolated dev/review phases and UAT generation"
+
+    - trigger: EC or fuzzy match on epic-chain
+      workflow: "{project-root}/_bmad/bmm/workflows/4-implementation/epic-chain/workflow.yaml"
+      description: "[EC] Analyze and execute multiple epics in sequence with dependency detection"

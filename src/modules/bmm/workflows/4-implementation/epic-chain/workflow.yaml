@@ -1,0 +1,52 @@
+name: epic-chain
+description: "Analyze and execute multiple epics in sequence with intelligent dependency detection, cross-epic analysis, and coordinated implementation planning"
+author: "BMad"
+
+# Critical variables from config
+config_source: "{project-root}/.bmad/bmm/config.yaml"
+output_folder: "{config_source}:output_folder"
+user_name: "{config_source}:user_name"
+communication_language: "{config_source}:communication_language"
+date: system-generated
+sprint_artifacts: "{config_source}:sprint_artifacts"
+
+# Workflow components
+installed_path: "{project-root}/.bmad/bmm/workflows/4-implementation/epic-chain"
+instructions: "{installed_path}/instructions.md"
+launcher: "{installed_path}/epic-chain-launcher.md"
+
+# Variables and inputs
+variables:
+  # Project context
+  project_context: "**/project-context.md"
+  project_name: "{config_source}:project_name"
+
+  # Epic sources
+  epics_location: "{output_folder}"
+  epics_pattern: "epic*.md"
+  stories_location: "{sprint_artifacts}"
+
+  # Chain configuration (can be overridden by user)
+  chain_mode: "sequential"  # sequential | parallel | dependency-aware
+  analysis_depth: "standard"  # quick | standard | thorough
+
+  # Output locations
+  chain_plan_file: "{sprint_artifacts}/chain-plan.yaml"
+  chain_log_file: "{sprint_artifacts}/chain-execution.log"
+
+# Input file patterns
+input_file_patterns:
+  epics:
+    description: "All epics to potentially include in chain"
+    whole: "{output_folder}/*epic*.md"
+    sharded: "{output_folder}/*epic*/*.md"
+    load_strategy: "FULL_LOAD"
+  stories:
+    description: "All story files for analysis"
+    whole: "{stories_location}/*.md"
+    load_strategy: "METADATA_ONLY"
+
+# Output configuration
+default_output_file: "{chain_plan_file}"
+
+standalone: true
