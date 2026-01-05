@@ -57,3 +57,7 @@ agent:
     - trigger: UV or fuzzy match on uat-validate
       workflow: "{project-root}/_bmad/bmm/workflows/5-validation/uat-validate/workflow.yaml"
       description: "[UV] Validate epic against UAT scenarios with self-healing fix loop on failure"
+
+    - trigger: CR or fuzzy match on chain-report
+      exec: "{project-root}/_bmad/bmm/workflows/4-implementation/epic-chain/steps/step-10-generate-report.md"
+      description: "[CR] Generate execution report from completed epic chain metrics"

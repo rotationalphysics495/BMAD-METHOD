@@ -320,3 +320,39 @@ After each epic completes, generate handoff:
 | Story execution fails | Log failure, continue to next story, report in summary |
 | Epic fails completely | Pause chain, ask user whether to continue or abort |
 | Context handoff fails | Log warning, continue without handoff |
+
+---
+
+## Report Generation
+
+After chain completion, generate an execution report using step 10:
+
+<step n="10" goal="Generate chain execution report">
+<action>Load step file: `{installed_path}/steps/step-10-generate-report.md`</action>
+
+This step:
+1. Loads metrics from `{metrics_folder}/epic-{id}-metrics.yaml` for each epic
+2. Aggregates timing, story counts, issues, and UAT results
+3. Builds dependency graph visualization
+4. Calculates token/cost estimates
+5. Renders the report template
+6. Saves to `{chain_report_file}`
+
+**Trigger manually:** `*chain-report` or `*CR`
+
+**Output:** `{sprint_artifacts}/chain-execution-report.md`
+</step>
+
+## Metrics Collection
+
+During epic execution, metrics are collected to `{metrics_folder}/epic-{id}-metrics.yaml`:
+
+| Metric | Source | Description |
+|--------|--------|-------------|
+| Timing | Shell script | Start/end timestamps per epic |
+| Story counts | Story file status | Completed/failed/skipped counts |
+| UAT results | uat-validate | Gate status, fix attempts |
+| Issues | Dev/review phases | Problems encountered |
+| Git info | git log | Commit counts, SHAs |
+
+See `templates/epic-metrics-template.yaml` for full schema.

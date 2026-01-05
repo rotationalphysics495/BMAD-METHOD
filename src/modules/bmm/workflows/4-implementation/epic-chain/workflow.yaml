@@ -27,12 +27,24 @@ variables:
   stories_location: "{sprint_artifacts}"
 
   # Chain configuration (can be overridden by user)
-  chain_mode: "sequential"  # sequential | parallel | dependency-aware
-  analysis_depth: "standard"  # quick | standard | thorough
+  chain_mode: "sequential" # sequential | parallel | dependency-aware
+  analysis_depth: "standard" # quick | standard | thorough
 
   # Output locations
   chain_plan_file: "{sprint_artifacts}/chain-plan.yaml"
   chain_log_file: "{sprint_artifacts}/chain-execution.log"
+
+  # Report generation
+  chain_report_file: "{sprint_artifacts}/chain-execution-report.md"
+  metrics_folder: "{sprint_artifacts}/metrics"
+  generate_report: true
+
+  # UAT locations
+  uat_location: "{output_folder}/uat"
+  handoffs_location: "{sprint_artifacts}/handoffs"
+
+  # Report template
+  report_template: "{installed_path}/templates/chain-report-template.md"
 
 # Input file patterns
 input_file_patterns:

@@ -1,0 +1,94 @@
+# Epic Metrics Template
+# Generated per-epic during epic-execute workflow
+# Aggregated by chain report generator
+
+# Epic identification
+epic_id: "{epic_id}"
+epic_name: "{epic_name}"
+epic_file: "{epic_file_path}"
+
+# Execution timing
+execution:
+  start_time: "{start_timestamp}"      # ISO 8601 format
+  end_time: "{end_timestamp}"          # ISO 8601 format
+  duration_seconds: 0                   # Calculated from start/end
+  duration_formatted: ""                # Human readable, e.g., "1.5 hours"
+
+# Story counts
+stories:
+  total: 0
+  completed: 0
+  failed: 0
+  skipped: 0
+  in_review: 0
+
+# Per-story timing (optional, for detailed reports)
+story_timing: []
+  # - story_id: "1-1"
+  #   title: "Initialize Monorepo"
+  #   start_time: ""
+  #   end_time: ""
+  #   duration_seconds: 0
+  #   status: "completed"  # completed | failed | skipped
+
+# UAT validation results
+uat:
+  document_generated: false
+  document_path: ""
+  scenarios:
+    total: 0
+    automatable: 0
+    semi_automated: 0
+    manual_only: 0
+
+# Validation gate results
+validation:
+  gate_executed: false
+  gate_mode: "quick"               # quick | full | skip
+  timestamp: ""
+  results:
+    passed: 0
+    failed: 0
+    skipped: 0
+  gate_status: "PENDING"           # PASS | FAIL | PENDING | SKIPPED
+  blocking_issues: []
+
+  # Self-healing fix loop tracking
+  fix_attempts: 0
+  fix_history: []
+  # Example fix_history entry:
+  # - attempt: 1
+  #   timestamp: ""
+  #   failed_scenarios: ["scenario-3", "scenario-5"]
+  #   fix_context: "docs/sprint-artifacts/uat-fix-context-1-1.md"
+  #   fix_commit: "abc123"
+  #   result: "partial"  # success | partial | failed
+
+# Issues encountered during execution
+issues: []
+# Example issue entry:
+# - type: "signaling_mismatch"
+#   story: "1-3"
+#   description: "Story completed but output format didn't match expected"
+#   severity: "low"        # low | medium | high | blocker
+#   resolved: true
+#   resolution: "manual_status_update"
+
+# Dependencies (from chain plan)
+dependencies:
+  requires: []               # Epic IDs this epic depends on
+  enables: []                # Epic IDs that depend on this epic
+
+# Git information
+git:
+  commits: 0                 # Number of commits for this epic
+  branch: ""                 # Branch used (if feature branch)
+  first_commit: ""           # SHA of first commit
+  last_commit: ""            # SHA of last commit
+
+# Estimated token usage
+tokens:
+  estimated_calls: 0         # stories * 2 (dev + review)
+  estimated_input: 0         # estimated_calls * 8000
+  estimated_output: 0        # estimated_calls * 4000
+  estimated_total: 0         # input + output
