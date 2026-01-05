@@ -1,0 +1,156 @@
+# UAT Validate Workflow
+name: uat-validate
+description: "Execute User Acceptance Testing scenarios against a completed epic, validate implementations meet acceptance criteria, and trigger self-healing fix loops on failures"
+author: "BMad"
+
+# Critical variables from config
+config_source: "{project-root}/_bmad/bmm/config.yaml"
+user_name: "{config_source}:user_name"
+communication_language: "{config_source}:communication_language"
+date: system-generated
+planning_artifacts: "{config_source}:planning_artifacts"
+implementation_artifacts: "{config_source}:implementation_artifacts"
+sprint_artifacts: "{config_source}:sprint_artifacts"
+output_folder: "{sprint_artifacts}"
+
+# Workflow components
+installed_path: "{project-root}/_bmad/bmm/workflows/5-validation/uat-validate"
+instructions: "{installed_path}/instructions.md"
+fix_context_template: "{installed_path}/uat-fix-context-template.md"
+
+# Variables and inputs
+variables:
+  # Project context
+  project_context: "**/project-context.md"
+  project_name: "{config_source}:project_name"
+
+  # UAT document locations
+  uat_docs_location: "{planning_artifacts}/uat"
+  uat_doc_pattern: "epic-{epic_id}-uat.md"
+
+  # Story locations (for acceptance criteria reference)
+  stories_location: "{implementation_artifacts}"
+
+  # Metrics output
+  metrics_folder: "{sprint_artifacts}/metrics"
+  metrics_file: "{metrics_folder}/epic-{epic_id}-metrics.yaml"
+
+  # Fix context output (for self-healing loop)
+  fix_context_file: "{sprint_artifacts}/uat-fix-context-{epic_id}-{attempt}.md"
+
+  # Gate configuration
+  gate_mode: "quick" # quick | full | skip
+  timeout_per_scenario: 30 # seconds per scenario execution
+
+  # Self-healing configuration
+  self_heal_enabled: true
+  max_retries: 2 # maximum fix attempts before halting
+  fix_workflow: "quick-dev" # workflow to invoke for fixes
+  on_max_retries: "halt" # halt | continue_with_warning | notify_human
+
+# Scenario classification patterns
+scenario_patterns:
+  automatable:
+    description: "Scenarios that can be fully automated via shell execution"
+    indicators:
+      - "npx"
+      - "npm run"
+      - "curl"
+      - "wget"
+      - "--version"
+      - "db status"
+      - "db migrate"
+      - "config validate"
+      - "/health"
+      - "test-queue"
+    validation_method: "shell_execution"
+
+  semi_automated:
+    description: "Scenarios that can be executed but require manual verification"
+    indicators:
+      - "test-send"
+      - "email"
+      - "inbox"
+      - "check your"
+      - "verify in browser"
+    validation_method: "execute_and_flag"
+
+  manual_only:
+    description: "Scenarios requiring full human interaction"
+    indicators:
+      - "Railway"
+      - "dashboard"
+      - "two terminal"
+      - "side by side"
+      - "browser"
+      - "visual"
+    validation_method: "skip_with_checklist"
+
+# Input file patterns
+input_file_patterns:
+  uat_document:
+    description: "UAT document for the epic being validated"
+    pattern: "{uat_docs_location}/epic-{epic_id}-uat.md"
+    load_strategy: "FULL_LOAD"
+    required: true
+
+  stories:
+    description: "Story files for acceptance criteria reference"
+    pattern: "{stories_location}/story-{epic_id}.*.md"
+    load_strategy: "METADATA_ONLY"
+    required: false
+
+  epic_metrics:
+    description: "Existing metrics file if re-validating"
+    pattern: "{metrics_folder}/epic-{epic_id}-metrics.yaml"
+    load_strategy: "FULL_LOAD"
+    required: false
+
+# Output files
+outputs:
+  gate_result:
+    description: "Gate pass/fail result for script parsing"
+    format: |
+      UAT_GATE_RESULT: {PASS|FAIL}
+      CRITICAL_PASSED: {n}/{total}
+      BLOCKING_ISSUES: [{scenario_ids}]
+      FIX_CONTEXT: {path_if_generated}
+
+  metrics_update:
+    description: "Updated metrics file with validation results"
+    path: "{metrics_file}"
+
+  fix_context:
+    description: "Fix context document for quick-dev (only on failure)"
+    path: "{fix_context_file}"
+    condition: "gate_result == FAIL"
+
+# Workflow phases
+phases:
+  - name: "load"
+    description: "Load UAT document and classify scenarios"
+    outputs:
+      - scenario_list
+      - classification_summary
+
+  - name: "execute"
+    description: "Execute automatable scenarios via shell"
+    outputs:
+      - execution_results
+      - pass_count
+      - fail_count
+
+  - name: "evaluate"
+    description: "Determine gate status and generate fix context if needed"
+    outputs:
+      - gate_result
+      - fix_context (conditional)
+
+  - name: "report"
+    description: "Update metrics and output results"
+    outputs:
+      - metrics_file
+      - gate_output
+
+standalone: true
+web_bundle: false
