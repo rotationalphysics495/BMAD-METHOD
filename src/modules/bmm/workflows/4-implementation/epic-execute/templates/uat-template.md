@@ -124,8 +124,8 @@ This epic is **successful** when a user can:
 
 | Metric | Value |
 |--------|-------|
-| Scenarios Tested | __ / __ |
-| Scenarios Passed | __ / __ |
+| Scenarios Tested | \_\_ / \_\_ |
+| Scenarios Passed | \_\_ / \_\_ |
 | Critical Issues | |
 | Major Issues | |
 | Minor Issues | |

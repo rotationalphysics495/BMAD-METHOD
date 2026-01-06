@@ -64,6 +64,121 @@ log_warn() {
 }
 
 # =============================================================================
+# Metrics Functions
+# =============================================================================
+
+METRICS_DIR=""
+METRICS_FILE=""
+
+init_metrics() {
+    METRICS_DIR="$SPRINT_ARTIFACTS_DIR/metrics"
+    METRICS_FILE="$METRICS_DIR/epic-${EPIC_ID}-metrics.yaml"
+    mkdir -p "$METRICS_DIR"
+
+    local start_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    cat > "$METRICS_FILE" << EOF
+epic_id: "$EPIC_ID"
+execution:
+  start_time: "$start_time"
+  end_time: ""
+  duration_seconds: 0
+stories:
+  total: 0
+  completed: 0
+  failed: 0
+  skipped: 0
+validation:
+  gate_executed: false
+  gate_status: "PENDING"
+  fix_attempts: 0
+issues: []
+EOF
+
+    log "Metrics initialized: $METRICS_FILE"
+}
+
+update_story_metrics() {
+    local status="$1"  # completed|failed|skipped
+
+    if [ -z "$METRICS_FILE" ] || [ ! -f "$METRICS_FILE" ]; then
+        return
+    fi
+
+    # Check if yq is available for YAML manipulation
+    if command -v yq >/dev/null 2>&1; then
+        case "$status" in
+            completed) yq -i '.stories.completed += 1' "$METRICS_FILE" ;;
+            failed)    yq -i '.stories.failed += 1' "$METRICS_FILE" ;;
+            skipped)   yq -i '.stories.skipped += 1' "$METRICS_FILE" ;;
+        esac
+    else
+        # Fallback: log warning (metrics will be finalized at end)
+        [ "$VERBOSE" = true ] && log_warn "yq not found - metrics update deferred"
+    fi
+}
+
+add_metrics_issue() {
+    local story_id="$1"
+    local issue_type="$2"
+    local message="$3"
+
+    if [ -z "$METRICS_FILE" ] || [ ! -f "$METRICS_FILE" ]; then
+        return
+    fi
+
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    if command -v yq >/dev/null 2>&1; then
+        yq -i ".issues += [{\"story\": \"$story_id\", \"type\": \"$issue_type\", \"message\": \"$message\", \"timestamp\": \"$timestamp\"}]" "$METRICS_FILE"
+    fi
+}
+
+finalize_metrics() {
+    local total_stories="$1"
+    local completed="$2"
+    local failed="$3"
+    local skipped="$4"
+    local duration="$5"
+
+    if [ -z "$METRICS_FILE" ] || [ ! -f "$METRICS_FILE" ]; then
+        return
+    fi
+
+    local end_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    if command -v yq >/dev/null 2>&1; then
+        yq -i ".execution.end_time = \"$end_time\"" "$METRICS_FILE"
+        yq -i ".execution.duration_seconds = $duration" "$METRICS_FILE"
+        yq -i ".stories.total = $total_stories" "$METRICS_FILE"
+        yq -i ".stories.completed = $completed" "$METRICS_FILE"
+        yq -i ".stories.failed = $failed" "$METRICS_FILE"
+        yq -i ".stories.skipped = $skipped" "$METRICS_FILE"
+    else
+        # Fallback: rewrite the file with final values
+        cat > "$METRICS_FILE" << EOF
+epic_id: "$EPIC_ID"
+execution:
+  start_time: "$EPIC_START_TIME"
+  end_time: "$end_time"
+  duration_seconds: $duration
+stories:
+  total: $total_stories
+  completed: $completed
+  failed: $failed
+  skipped: $skipped
+validation:
+  gate_executed: false
+  gate_status: "PENDING"
+  fix_attempts: 0
+issues: []
+EOF
+    fi
+
+    log "Metrics finalized: $METRICS_FILE"
+}
+
+# =============================================================================
 # Argument Parsing
 # =============================================================================
 
@@ -141,6 +256,11 @@ log "Project root: $PROJECT_ROOT"
 # Ensure directories exist
 mkdir -p "$UAT_DIR"
 mkdir -p "$SPRINTS_DIR"
+
+# Initialize metrics collection
+EPIC_START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+EPIC_START_SECONDS=$(date +%s)
+init_metrics
 
 # Find epic file (supports both epic-39-*.md and epic-039-*.md formats)
 EPIC_FILE=""
@@ -554,6 +674,7 @@ for story_file in "${STORIES[@]}"; do
         else
             log_warn "Skipping $story_id (waiting for $START_FROM)"
             ((SKIPPED++))
+            update_story_metrics "skipped"
             continue
         fi
     fi
@@ -563,6 +684,7 @@ for story_file in "${STORIES[@]}"; do
         if grep -q "^Status:.*Done" "$story_file" 2>/dev/null; then
             log_warn "Skipping $story_id (Status: Done)"
             ((SKIPPED++))
+            update_story_metrics "skipped"
             continue
         fi
     fi
@@ -576,22 +698,27 @@ for story_file in "${STORIES[@]}"; do
     if ! execute_dev_phase "$story_file"; then
         log_error "Dev phase failed for $story_id"
         ((FAILED++))
+        update_story_metrics "failed"
+        add_metrics_issue "$story_id" "dev_phase_failed" "Development phase did not complete"
         continue
     fi
-    
+
     # REVIEW PHASE (Context 2 - Fresh)
     if [ "$SKIP_REVIEW" = false ]; then
         if ! execute_review_phase "$story_file"; then
             log_error "Review phase failed for $story_id"
             ((FAILED++))
+            update_story_metrics "failed"
+            add_metrics_issue "$story_id" "review_failed" "Code review phase failed"
             continue
         fi
     fi
-    
+
     # COMMIT
     commit_story "$story_id"
-    
+
     ((COMPLETED++))
+    update_story_metrics "completed"
     log_success "Story complete: $story_id ($COMPLETED/${#STORIES[@]})"
 done
 
@@ -613,6 +740,9 @@ generate_uat
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
+# Finalize metrics with final counts
+finalize_metrics "${#STORIES[@]}" "$COMPLETED" "$FAILED" "$SKIPPED" "$DURATION"
+
 echo ""
 log "=========================================="
 log "EPIC EXECUTION COMPLETE"
@@ -628,6 +758,7 @@ echo ""
 echo "  Deliverables:"
 echo "    - Stories:  $STORIES_DIR/"
 echo "    - UAT:      $UAT_DIR/epic-${EPIC_ID}-uat.md"
+echo "    - Metrics:  $METRICS_FILE"
 echo "    - Log:      $LOG_FILE"
 echo ""
 

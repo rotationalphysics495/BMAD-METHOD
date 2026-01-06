@@ -9,10 +9,10 @@ epic_file: "{epic_file_path}"
 
 # Execution timing
 execution:
-  start_time: "{start_timestamp}"      # ISO 8601 format
-  end_time: "{end_timestamp}"          # ISO 8601 format
-  duration_seconds: 0                   # Calculated from start/end
-  duration_formatted: ""                # Human readable, e.g., "1.5 hours"
+  start_time: "{start_timestamp}" # ISO 8601 format
+  end_time: "{end_timestamp}" # ISO 8601 format
+  duration_seconds: 0 # Calculated from start/end
+  duration_formatted: "" # Human readable, e.g., "1.5 hours"
 
 # Story counts
 stories:
@@ -44,13 +44,13 @@ uat:
 # Validation gate results
 validation:
   gate_executed: false
-  gate_mode: "quick"               # quick | full | skip
+  gate_mode: "quick" # quick | full | skip
   timestamp: ""
   results:
     passed: 0
     failed: 0
     skipped: 0
-  gate_status: "PENDING"           # PASS | FAIL | PENDING | SKIPPED
+  gate_status: "PENDING" # PASS | FAIL | PENDING | SKIPPED
   blocking_issues: []
 
   # Self-healing fix loop tracking
@@ -76,19 +76,19 @@ issues: []
 
 # Dependencies (from chain plan)
 dependencies:
-  requires: []               # Epic IDs this epic depends on
-  enables: []                # Epic IDs that depend on this epic
+  requires: [] # Epic IDs this epic depends on
+  enables: [] # Epic IDs that depend on this epic
 
 # Git information
 git:
-  commits: 0                 # Number of commits for this epic
-  branch: ""                 # Branch used (if feature branch)
-  first_commit: ""           # SHA of first commit
-  last_commit: ""            # SHA of last commit
+  commits: 0 # Number of commits for this epic
+  branch: "" # Branch used (if feature branch)
+  first_commit: "" # SHA of first commit
+  last_commit: "" # SHA of last commit
 
 # Estimated token usage
 tokens:
-  estimated_calls: 0         # stories * 2 (dev + review)
-  estimated_input: 0         # estimated_calls * 8000
-  estimated_output: 0        # estimated_calls * 4000
-  estimated_total: 0         # input + output
+  estimated_calls: 0 # stories * 2 (dev + review)
+  estimated_input: 0 # estimated_calls * 8000
+  estimated_output: 0 # estimated_calls * 4000
+  estimated_total: 0 # input + output

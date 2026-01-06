@@ -9,15 +9,25 @@
 #   ./epic-chain.sh 36 37 38 --dry-run --verbose
 #   ./epic-chain.sh 36 37 38 --analyze-only
 #   ./epic-chain.sh 36 37 38 --start-from 37
+#   ./epic-chain.sh 36 37 38 --uat-gate=full --uat-blocking
 #
 # Options:
-#   --dry-run        Show what would be executed without running
-#   --analyze-only   Run analysis phase only, don't execute
-#   --verbose        Show detailed output
-#   --start-from ID  Start from a specific epic (skip earlier ones)
-#   --skip-done      Skip epics/stories with Status: Done
-#   --no-handoff     Don't generate context handoffs between epics
-#   --no-combined-uat Skip combined UAT generation at end
+#   --dry-run           Show what would be executed without running
+#   --analyze-only      Run analysis phase only, don't execute
+#   --verbose           Show detailed output
+#   --start-from ID     Start from a specific epic (skip earlier ones)
+#   --skip-done         Skip epics/stories with Status: Done
+#   --no-handoff        Don't generate context handoffs between epics
+#   --no-combined-uat   Skip combined UAT generation at end
+#
+# UAT Gate Options:
+#   --uat-gate=MODE     UAT validation mode: quick|full|skip (default: quick)
+#   --uat-blocking      Halt chain if UAT fails (default: continue)
+#   --uat-retries=N     Max fix attempts per epic (default: 2)
+#   --no-uat            Disable UAT validation gate entirely
+#
+# Report Options:
+#   --no-report         Skip chain execution report generation
 #
 
 set -e
@@ -47,6 +57,19 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# UAT Gate Configuration
+UAT_GATE_ENABLED="${UAT_GATE_ENABLED:-true}"
+UAT_GATE_MODE="${UAT_GATE_MODE:-quick}"
+UAT_MAX_RETRIES="${UAT_MAX_RETRIES:-2}"
+UAT_BLOCKING="${UAT_BLOCKING:-false}"
+
+# Metrics Configuration
+METRICS_DIR="$SPRINT_ARTIFACTS_DIR/metrics"
+
+# Report Configuration
+GENERATE_REPORT="${GENERATE_REPORT:-true}"
+CHAIN_REPORT_FILE="$SPRINT_ARTIFACTS_DIR/chain-execution-report.md"
 
 # =============================================================================
 # Helper Functions
@@ -85,6 +108,80 @@ log_section() {
     echo -e "${BOLD}───────────────────────────────────────────────────────────${NC}"
     echo -e "${BOLD}  $1${NC}"
     echo -e "${BOLD}───────────────────────────────────────────────────────────${NC}"
+}
+
+# Helper function to create basic report if Claude fails
+create_basic_report() {
+    local end_time_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local duration_formatted="${DURATION}s"
+    if [ $DURATION -gt 3600 ]; then
+        duration_formatted="$((DURATION / 3600))h $((DURATION % 3600 / 60))m"
+    elif [ $DURATION -gt 60 ]; then
+        duration_formatted="$((DURATION / 60))m $((DURATION % 60))s"
+    fi
+
+    cat > "$CHAIN_REPORT_FILE" << EOF
+# Epic Chain Execution Report
+
+## Executive Summary
+
+**Execution Method:** BMAD Epic Chain (automated AI-driven development)
+**Status:** $([ $FAILED_EPICS -eq 0 ] && echo "COMPLETE" || echo "PARTIAL")
+
+| Metric | Value |
+|--------|-------|
+| Total Epics | ${#EPIC_IDS[@]} |
+| Completed | $COMPLETED_EPICS |
+| Failed | $FAILED_EPICS |
+| Skipped | $SKIPPED_EPICS |
+| Duration | $duration_formatted |
+
+---
+
+## Timeline
+
+| Epic | Status |
+|------|--------|
+EOF
+
+    for epic_id in "${EPIC_IDS[@]}"; do
+        local status="Unknown"
+        local metrics_file="$METRICS_DIR/epic-${epic_id}-metrics.yaml"
+        if [ -f "$metrics_file" ]; then
+            if command -v yq >/dev/null 2>&1; then
+                local completed=$(yq '.stories.completed // 0' "$metrics_file")
+                local failed=$(yq '.stories.failed // 0' "$metrics_file")
+                if [ "$failed" -gt 0 ]; then
+                    status="Partial ($completed completed, $failed failed)"
+                else
+                    status="Complete ($completed stories)"
+                fi
+            fi
+        fi
+        echo "| Epic $epic_id | $status |" >> "$CHAIN_REPORT_FILE"
+    done
+
+    cat >> "$CHAIN_REPORT_FILE" << EOF
+
+---
+
+## Artifacts
+
+| Artifact | Location |
+|----------|----------|
+| Chain Plan | $CHAIN_PLAN_FILE |
+| Metrics | $METRICS_DIR/ |
+| UAT Documents | $UAT_DIR/ |
+| Handoffs | $HANDOFF_DIR/ |
+| Log | $LOG_FILE |
+
+---
+
+*Report generated: $end_time_iso*
+*BMAD Method Epic Chain*
+EOF
+
+    log_success "Basic report created: $CHAIN_REPORT_FILE"
 }
 
 # =============================================================================
@@ -130,6 +227,26 @@ while [[ $# -gt 0 ]]; do
             NO_COMBINED_UAT=true
             shift
             ;;
+        --uat-gate=*)
+            UAT_GATE_MODE="${1#*=}"
+            shift
+            ;;
+        --uat-blocking)
+            UAT_BLOCKING=true
+            shift
+            ;;
+        --no-uat)
+            UAT_GATE_ENABLED=false
+            shift
+            ;;
+        --uat-retries=*)
+            UAT_MAX_RETRIES="${1#*=}"
+            shift
+            ;;
+        --no-report)
+            GENERATE_REPORT=false
+            shift
+            ;;
         -*)
             echo "Unknown option: $1"
             exit 1
@@ -149,15 +266,25 @@ if [ ${#EPIC_IDS[@]} -eq 0 ]; then
     echo "  $0 36 37 38 --dry-run          # Show what would happen"
     echo "  $0 36 37 38 --analyze-only     # Just analyze, don't execute"
     echo "  $0 36 37 38 --start-from 37    # Resume from epic 37"
+    echo "  $0 36 37 38 --uat-gate=full    # Run full UAT validation after each epic"
     echo ""
     echo "Options:"
-    echo "  --dry-run        Show execution plan without running"
-    echo "  --analyze-only   Analyze dependencies only"
-    echo "  --verbose        Detailed output"
-    echo "  --start-from ID  Start from specific epic"
-    echo "  --skip-done      Skip completed stories"
-    echo "  --no-handoff     Skip context handoffs between epics"
-    echo "  --no-combined-uat Skip combined UAT at end"
+    echo "  --dry-run           Show execution plan without running"
+    echo "  --analyze-only      Analyze dependencies only"
+    echo "  --verbose           Detailed output"
+    echo "  --start-from ID     Start from specific epic"
+    echo "  --skip-done         Skip completed stories"
+    echo "  --no-handoff        Skip context handoffs between epics"
+    echo "  --no-combined-uat   Skip combined UAT at end"
+    echo ""
+    echo "UAT Gate Options:"
+    echo "  --uat-gate=MODE     UAT validation mode: quick|full|skip (default: quick)"
+    echo "  --uat-blocking      Halt chain if UAT fails (default: continue)"
+    echo "  --uat-retries=N     Max fix attempts per epic (default: 2)"
+    echo "  --no-uat            Disable UAT validation gate entirely"
+    echo ""
+    echo "Report Options:"
+    echo "  --no-report         Skip chain execution report generation"
     exit 1
 fi
 
@@ -395,6 +522,60 @@ for current_idx in "${!EXECUTION_ORDER[@]}"; do
     else
         if $exec_cmd; then
             log_success "Epic $epic_id completed"
+
+            # Run UAT validation if enabled
+            if [ "$UAT_GATE_ENABLED" = true ]; then
+                log_section "UAT Validation Gate: Epic $epic_id"
+
+                uat_cmd="$SCRIPT_DIR/uat-validate.sh $epic_id --gate-mode=$UAT_GATE_MODE --max-retries=$UAT_MAX_RETRIES"
+
+                if [ "$VERBOSE" = true ]; then
+                    uat_cmd="$uat_cmd --verbose"
+                fi
+
+                log "Running: $uat_cmd"
+
+                # Capture UAT result
+                uat_output=""
+                uat_exit_code=0
+                uat_output=$($uat_cmd 2>&1) || uat_exit_code=$?
+
+                echo "$uat_output" >> "$LOG_FILE"
+
+                # Parse result signals
+                if echo "$uat_output" | grep -q "UAT_GATE_RESULT: PASS"; then
+                    log_success "UAT validation passed for Epic $epic_id"
+
+                    # Update metrics file if it exists
+                    epic_metrics_file="$METRICS_DIR/epic-${epic_id}-metrics.yaml"
+                    if [ -f "$epic_metrics_file" ] && command -v yq >/dev/null 2>&1; then
+                        yq -i '.validation.gate_executed = true' "$epic_metrics_file"
+                        yq -i '.validation.gate_status = "PASS"' "$epic_metrics_file"
+                    fi
+                else
+                    log_error "UAT validation failed for Epic $epic_id"
+
+                    # Update metrics file if it exists
+                    epic_metrics_file="$METRICS_DIR/epic-${epic_id}-metrics.yaml"
+                    if [ -f "$epic_metrics_file" ] && command -v yq >/dev/null 2>&1; then
+                        yq -i '.validation.gate_executed = true' "$epic_metrics_file"
+                        yq -i '.validation.gate_status = "FAIL"' "$epic_metrics_file"
+                    fi
+
+                    # Extract fix attempts from output
+                    fix_attempts=$(echo "$uat_output" | grep -oE "UAT_FIX_ATTEMPTS: [0-9]+" | grep -oE "[0-9]+" || echo "0")
+                    [ "$VERBOSE" = true ] && log "Fix attempts: $fix_attempts"
+
+                    if [ "$UAT_BLOCKING" = true ]; then
+                        log_error "UAT blocking enabled - halting chain"
+                        ((FAILED_EPICS++))
+                        break
+                    else
+                        log_warn "UAT blocking disabled - continuing to next epic"
+                    fi
+                fi
+            fi
+
             ((COMPLETED_EPICS++))
 
             # Generate handoff for next epic
@@ -408,6 +589,26 @@ for current_idx in "${!EXECUTION_ORDER[@]}"; do
                     log "Generating context handoff: Epic $epic_id → Epic $next_epic"
 
                     story_count=${EPIC_STORIES_LIST[$current_idx]}
+
+                    # Determine UAT validation status for handoff
+                    uat_status="Not executed"
+                    uat_fix_info=""
+                    if [ "$UAT_GATE_ENABLED" = true ]; then
+                        if echo "$uat_output" | grep -q "UAT_GATE_RESULT: PASS"; then
+                            uat_status="PASS"
+                            local fix_count=$(echo "$uat_output" | grep -oE "UAT_FIX_ATTEMPTS: [0-9]+" | grep -oE "[0-9]+" || echo "0")
+                            if [ "$fix_count" -gt 0 ]; then
+                                uat_status="PASS (after $fix_count fix attempts)"
+                                uat_fix_info="Self-healing fixes were applied. Review fix contexts at:
+\`docs/sprint-artifacts/uat-fixes/epic-${epic_id}-fix-context-*.md\`"
+                            fi
+                        else
+                            uat_status="FAIL (non-blocking)"
+                            uat_fix_info="UAT validation failed but chain continued (non-blocking mode).
+Review failures at: \`docs/sprint-artifacts/uat-fixes/epic-${epic_id}-fix-context-*.md\`"
+                        fi
+                    fi
+
                     cat > "$handoff_file" << EOF
 # Epic $epic_id → Epic $next_epic Handoff
 
@@ -418,6 +619,11 @@ $(date '+%Y-%m-%d %H:%M:%S')
 
 Epic $epic_id has been completed. Key context for Epic $next_epic:
 
+### Implementation Status
+- **Stories:** Completed via epic-execute workflow
+- **UAT Validation:** $uat_status
+- **Metrics:** \`$METRICS_DIR/epic-${epic_id}-metrics.yaml\`
+
 ### Patterns Established
 - Review code changes in Epic $epic_id for established patterns
 - Check \`docs/stories/${epic_id}-*\` for implementation details
@@ -425,9 +631,17 @@ Epic $epic_id has been completed. Key context for Epic $next_epic:
 ### Files Modified
 $(git diff --name-only HEAD~${story_count} HEAD 2>/dev/null | head -20 || echo "Unable to determine - check git log")
 
+### UAT Document
+- Location: \`docs/uat/epic-${epic_id}-uat.md\`
+- Contains test scenarios for regression testing
+
+$([ -n "$uat_fix_info" ] && echo "### Fix Context
+$uat_fix_info")
+
 ### Notes for Next Epic
 - Continue following patterns established in this epic
-- Reference UAT document at \`docs/uat/epic-${epic_id}-uat.md\` for context
+- Ensure changes don't break Epic $epic_id functionality
+- Reference UAT document for integration points
 
 EOF
                     log_success "Handoff saved to: $handoff_file"
@@ -509,6 +723,108 @@ EOF
 fi
 
 # =============================================================================
+# Phase 7: Generate Chain Execution Report
+# =============================================================================
+
+if [ "$GENERATE_REPORT" = true ] && [ "$DRY_RUN" = false ]; then
+    log_section "Generating Chain Execution Report"
+
+    # Check if metrics files exist
+    metrics_found=0
+    for epic_id in "${EPIC_IDS[@]}"; do
+        if [ -f "$METRICS_DIR/epic-${epic_id}-metrics.yaml" ]; then
+            ((metrics_found++))
+        fi
+    done
+
+    if [ $metrics_found -eq 0 ]; then
+        log_warn "No metrics files found - skipping report generation"
+    else
+        log "Found $metrics_found metrics files"
+
+        # Determine workflow path (installed vs source)
+        WORKFLOW_PATH=""
+        if [ -d "$BMAD_DIR/bmm/workflows/4-implementation/epic-chain" ]; then
+            WORKFLOW_PATH="$BMAD_DIR/bmm/workflows/4-implementation/epic-chain"
+        elif [ -d "$PROJECT_ROOT/src/modules/bmm/workflows/4-implementation/epic-chain" ]; then
+            WORKFLOW_PATH="$PROJECT_ROOT/src/modules/bmm/workflows/4-implementation/epic-chain"
+        fi
+
+        # Build report generation prompt
+        report_prompt="You are Bob, the Scrum Master, generating a chain execution report.
+
+## Your Task
+
+Generate a comprehensive chain execution report for the completed epic chain.
+
+## Configuration
+
+- Chain Plan: $CHAIN_PLAN_FILE
+- Metrics Folder: $METRICS_DIR
+- Output File: $CHAIN_REPORT_FILE
+- Stories Location: $STORIES_DIR
+- UAT Location: $UAT_DIR
+- Epics Location: $EPICS_DIR
+- Handoffs Location: $HANDOFF_DIR
+
+## Epics in Chain
+
+${EPIC_IDS[*]}
+
+## Process
+
+1. Read the chain plan file to understand the epic sequence
+2. For each epic, load the metrics file from: $METRICS_DIR/epic-{id}-metrics.yaml
+3. Aggregate metrics across all epics:
+   - Total duration
+   - Story counts (total, completed, failed, skipped)
+   - UAT gate results
+   - Issues encountered
+4. Generate the report following the template structure
+
+## Report Structure
+
+Generate a markdown report with these sections:
+- Executive Summary (status, counts, duration)
+- Timeline (epic-by-epic execution details)
+- What Was Built (brief per-epic summary)
+- Issues Encountered (aggregated from metrics)
+- UAT Validation Summary (gate results, fix attempts)
+- Artifacts Generated (list generated files)
+- Conclusion
+
+## Output
+
+Write the report to: $CHAIN_REPORT_FILE
+
+When complete, output exactly:
+REPORT_GENERATED: $CHAIN_REPORT_FILE"
+
+        log "Invoking report generator..."
+
+        # Execute report generation
+        report_result=$(claude --dangerously-skip-permissions -p "$report_prompt" 2>&1) || true
+
+        echo "$report_result" >> "$LOG_FILE"
+
+        if echo "$report_result" | grep -q "REPORT_GENERATED"; then
+            log_success "Report generated: $CHAIN_REPORT_FILE"
+
+            # Stage report file
+            git add "$CHAIN_REPORT_FILE" 2>/dev/null || true
+        else
+            log_warn "Report generation may not have completed cleanly"
+
+            # If Claude didn't generate it, create a basic report
+            if [ ! -f "$CHAIN_REPORT_FILE" ]; then
+                log "Creating basic report from metrics..."
+                create_basic_report
+            fi
+        fi
+    fi
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 
@@ -527,6 +843,10 @@ echo "  Artifacts:"
 echo "    - Chain Plan:    $CHAIN_PLAN_FILE"
 echo "    - Handoffs:      $HANDOFF_DIR/"
 echo "    - UAT Documents: $UAT_DIR/"
+echo "    - Metrics:       $METRICS_DIR/"
+if [ -f "$CHAIN_REPORT_FILE" ]; then
+echo "    - Report:        $CHAIN_REPORT_FILE"
+fi
 echo "    - Log:           $LOG_FILE"
 echo ""
 
@@ -537,5 +857,12 @@ fi
 
 log_success "All epics completed successfully"
 echo ""
-echo "Next step: Review UAT documents and run manual testing"
+if [ -f "$CHAIN_REPORT_FILE" ]; then
+    echo "Next steps:"
+    echo "  1. Review execution report: $CHAIN_REPORT_FILE"
+    echo "  2. Run UAT validation for each epic"
+    echo "  3. Execute manual test scenarios"
+else
+    echo "Next step: Review UAT documents and run manual testing"
+fi
 echo ""
