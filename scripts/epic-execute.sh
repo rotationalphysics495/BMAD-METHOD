@@ -32,6 +32,34 @@ UAT_DIR="$PROJECT_ROOT/docs/uat"
 
 LOG_FILE="/tmp/bmad-epic-execute-$$.log"
 
+# =============================================================================
+# BMAD Workflow Paths
+# =============================================================================
+
+# Source workflow files from the BMAD-METHOD repository
+BMAD_SRC_DIR="$SCRIPT_DIR/.."
+WORKFLOWS_DIR="$BMAD_SRC_DIR/src/modules/bmm/workflows/4-implementation"
+CORE_TASKS_DIR="$BMAD_SRC_DIR/src/core/tasks"
+
+# Dev Story Workflow
+DEV_WORKFLOW_DIR="$WORKFLOWS_DIR/dev-story"
+DEV_WORKFLOW_YAML="$DEV_WORKFLOW_DIR/workflow.yaml"
+DEV_WORKFLOW_INSTRUCTIONS="$DEV_WORKFLOW_DIR/instructions.xml"
+DEV_WORKFLOW_CHECKLIST="$DEV_WORKFLOW_DIR/checklist.md"
+
+# Code Review Workflow
+REVIEW_WORKFLOW_DIR="$WORKFLOWS_DIR/code-review"
+REVIEW_WORKFLOW_YAML="$REVIEW_WORKFLOW_DIR/workflow.yaml"
+REVIEW_WORKFLOW_INSTRUCTIONS="$REVIEW_WORKFLOW_DIR/instructions.xml"
+REVIEW_WORKFLOW_CHECKLIST="$REVIEW_WORKFLOW_DIR/checklist.md"
+
+# Core workflow executor
+WORKFLOW_EXECUTOR="$CORE_TASKS_DIR/workflow.xml"
+
+# UAT Generation (from epic-execute workflow)
+UAT_STEP_TEMPLATE="$WORKFLOWS_DIR/epic-execute/steps/step-04-generate-uat.md"
+UAT_DOC_TEMPLATE="$WORKFLOWS_DIR/epic-execute/templates/uat-template.md"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -88,11 +116,15 @@ stories:
   completed: 0
   failed: 0
   skipped: 0
+fix_loop:
+  total_fix_attempts: 0
+  stories_requiring_fixes: 0
+  max_retries_hit: 0
 validation:
   gate_executed: false
   gate_status: "PENDING"
-  fix_attempts: 0
 issues: []
+story_details: []
 EOF
 
     log "Metrics initialized: $METRICS_FILE"
@@ -131,6 +163,42 @@ add_metrics_issue() {
 
     if command -v yq >/dev/null 2>&1; then
         yq -i ".issues += [{\"story\": \"$story_id\", \"type\": \"$issue_type\", \"message\": \"$message\", \"timestamp\": \"$timestamp\"}]" "$METRICS_FILE"
+    fi
+}
+
+record_fix_attempt() {
+    local story_id="$1"
+    local attempt_num="$2"
+    local outcome="$3"  # success|failed|max_retries
+
+    if [ -z "$METRICS_FILE" ] || [ ! -f "$METRICS_FILE" ]; then
+        return
+    fi
+
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    if command -v yq >/dev/null 2>&1; then
+        # Increment total fix attempts
+        yq -i '.fix_loop.total_fix_attempts += 1' "$METRICS_FILE"
+
+        # Track per-story fix details
+        yq -i ".story_details += [{\"story\": \"$story_id\", \"fix_attempt\": $attempt_num, \"outcome\": \"$outcome\", \"timestamp\": \"$timestamp\"}]" "$METRICS_FILE"
+
+        if [ "$outcome" = "max_retries" ]; then
+            yq -i '.fix_loop.max_retries_hit += 1' "$METRICS_FILE"
+        fi
+    fi
+}
+
+record_story_required_fixes() {
+    local story_id="$1"
+
+    if [ -z "$METRICS_FILE" ] || [ ! -f "$METRICS_FILE" ]; then
+        return
+    fi
+
+    if command -v yq >/dev/null 2>&1; then
+        yq -i '.fix_loop.stories_requiring_fixes += 1' "$METRICS_FILE"
     fi
 }
 
@@ -176,6 +244,103 @@ EOF
     fi
 
     log "Metrics finalized: $METRICS_FILE"
+}
+
+# =============================================================================
+# Status Update Functions
+# =============================================================================
+
+update_story_status() {
+    local story_file="$1"
+    local new_status="$2"
+    local story_id=$(basename "$story_file" .md)
+
+    if [ ! -f "$story_file" ]; then
+        log_warn "Story file not found for status update: $story_file"
+        return 1
+    fi
+
+    # Update Status field in story file using sed
+    # Matches "Status: <anything>" and replaces with "Status: <new_status>"
+    if grep -q "^Status:" "$story_file"; then
+        sed -i.bak "s/^Status:.*$/Status: $new_status/" "$story_file" && rm -f "${story_file}.bak"
+        log_success "Updated story file status: $story_id → $new_status"
+    else
+        log_warn "No Status field found in story file: $story_id"
+        return 1
+    fi
+
+    return 0
+}
+
+update_sprint_status() {
+    local story_id="$1"
+    local new_status="$2"
+
+    # Find sprint-status.yaml file
+    local sprint_file=""
+    for search_dir in "$SPRINT_ARTIFACTS_DIR" "$SPRINTS_DIR" "$PROJECT_ROOT/docs"; do
+        if [ -f "$search_dir/sprint-status.yaml" ]; then
+            sprint_file="$search_dir/sprint-status.yaml"
+            break
+        fi
+    done
+
+    if [ -z "$sprint_file" ] || [ ! -f "$sprint_file" ]; then
+        [ "$VERBOSE" = true ] && log_warn "No sprint-status.yaml found - skipping sprint status update"
+        return 0
+    fi
+
+    # Extract story key from story_id (e.g., "1-2-user-auth" from various naming formats)
+    # Story files can be named: 1-2-user-auth.md, story-1.2-user-auth.md, etc.
+    local story_key=""
+
+    # Try to extract the key pattern: {epic}-{seq}-{name}
+    if [[ "$story_id" =~ ^([0-9]+)-([0-9]+)-(.+)$ ]]; then
+        story_key="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+    elif [[ "$story_id" =~ ^story-([0-9]+)\.([0-9]+)-(.+)$ ]]; then
+        story_key="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+    elif [[ "$story_id" =~ ^story-([0-9]+)-([0-9]+)-(.+)$ ]]; then
+        story_key="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+    else
+        # Use story_id as-is if no pattern matches
+        story_key="$story_id"
+    fi
+
+    # Check if yq is available for YAML manipulation
+    if command -v yq >/dev/null 2>&1; then
+        # Check if story key exists in development_status
+        if yq -e ".development_status[\"$story_key\"]" "$sprint_file" >/dev/null 2>&1; then
+            yq -i ".development_status[\"$story_key\"] = \"$new_status\"" "$sprint_file"
+            log_success "Updated sprint status: $story_key → $new_status"
+        else
+            [ "$VERBOSE" = true ] && log_warn "Story key '$story_key' not found in sprint-status.yaml"
+        fi
+    else
+        # Fallback: use sed for simple replacement
+        # This handles the format: "  1-2-user-auth: in-progress"
+        if grep -q "^[[:space:]]*${story_key}:" "$sprint_file"; then
+            sed -i.bak "s/^\([[:space:]]*${story_key}:\).*/\1 $new_status/" "$sprint_file" && rm -f "${sprint_file}.bak"
+            log_success "Updated sprint status: $story_key → $new_status (via sed)"
+        else
+            [ "$VERBOSE" = true ] && log_warn "Story key '$story_key' not found in sprint-status.yaml (sed fallback)"
+        fi
+    fi
+
+    return 0
+}
+
+mark_story_done() {
+    local story_file="$1"
+    local story_id=$(basename "$story_file" .md)
+
+    log "Marking story as done: $story_id"
+
+    # Update story file Status to done
+    update_story_status "$story_file" "done"
+
+    # Update sprint-status.yaml if it exists
+    update_sprint_status "$story_id" "done"
 }
 
 # =============================================================================
@@ -252,6 +417,59 @@ fi
 
 log "Starting epic execution for: $EPIC_ID"
 log "Project root: $PROJECT_ROOT"
+
+# =============================================================================
+# Validate BMAD Workflow Files
+# =============================================================================
+
+validate_workflows() {
+    local missing=0
+
+    log "Validating BMAD workflow files..."
+
+    # Core workflow executor
+    if [ ! -f "$WORKFLOW_EXECUTOR" ]; then
+        log_error "Missing: Core workflow executor at $WORKFLOW_EXECUTOR"
+        ((missing++))
+    fi
+
+    # Dev-story workflow
+    if [ ! -f "$DEV_WORKFLOW_YAML" ]; then
+        log_error "Missing: Dev workflow.yaml at $DEV_WORKFLOW_YAML"
+        ((missing++))
+    fi
+    if [ ! -f "$DEV_WORKFLOW_INSTRUCTIONS" ]; then
+        log_error "Missing: Dev instructions.xml at $DEV_WORKFLOW_INSTRUCTIONS"
+        ((missing++))
+    fi
+
+    # Code-review workflow
+    if [ ! -f "$REVIEW_WORKFLOW_YAML" ]; then
+        log_error "Missing: Review workflow.yaml at $REVIEW_WORKFLOW_YAML"
+        ((missing++))
+    fi
+    if [ ! -f "$REVIEW_WORKFLOW_INSTRUCTIONS" ]; then
+        log_error "Missing: Review instructions.xml at $REVIEW_WORKFLOW_INSTRUCTIONS"
+        ((missing++))
+    fi
+
+    if [ $missing -gt 0 ]; then
+        log_error "Missing $missing required BMAD workflow files"
+        log_error "Ensure you are running from the BMAD-METHOD repository"
+        log_error "Workflows expected at: $WORKFLOWS_DIR"
+        exit 1
+    fi
+
+    log_success "All BMAD workflow files validated"
+
+    if [ "$VERBOSE" = true ]; then
+        echo "  Dev workflow:    $DEV_WORKFLOW_DIR"
+        echo "  Review workflow: $REVIEW_WORKFLOW_DIR"
+        echo "  Executor:        $WORKFLOW_EXECUTOR"
+    fi
+}
+
+validate_workflows
 
 # Ensure directories exist
 mkdir -p "$UAT_DIR"
@@ -355,63 +573,113 @@ fi
 execute_dev_phase() {
     local story_file="$1"
     local story_id=$(basename "$story_file" .md)
-    
-    log ">>> DEV PHASE: $story_id"
-    
+
+    log ">>> DEV PHASE: $story_id (using BMAD dev-story workflow)"
+
+    # Verify workflow files exist
+    if [ ! -f "$DEV_WORKFLOW_YAML" ] || [ ! -f "$DEV_WORKFLOW_INSTRUCTIONS" ]; then
+        log_error "BMAD dev-story workflow files not found"
+        log_error "Expected: $DEV_WORKFLOW_YAML"
+        log_error "Expected: $DEV_WORKFLOW_INSTRUCTIONS"
+        return 1
+    fi
+
+    # Read workflow components
+    local workflow_yaml=$(cat "$DEV_WORKFLOW_YAML")
+    local workflow_instructions=$(cat "$DEV_WORKFLOW_INSTRUCTIONS")
+    local workflow_checklist=""
+    if [ -f "$DEV_WORKFLOW_CHECKLIST" ]; then
+        workflow_checklist=$(cat "$DEV_WORKFLOW_CHECKLIST")
+    fi
+    local workflow_executor=$(cat "$WORKFLOW_EXECUTOR")
     local story_contents=$(cat "$story_file")
-    
-    # Build the dev prompt
-    local dev_prompt="You are the Dev agent executing a BMAD story implementation.
 
-## Your Task
+    # Build the dev prompt using BMAD workflow
+    local dev_prompt="You are executing a BMAD dev-story workflow in automated mode.
 
-Implement story: $story_id
+## Workflow Execution Context
 
-## Story Specification
+You are running the BMAD dev-story workflow to implement a story. This is an AUTOMATED execution
+as part of an epic chain - execute the workflow completely without user interaction prompts.
 
-<story>
+### CRITICAL AUTOMATION RULES
+- Do NOT pause for user confirmation at any step
+- Do NOT ask questions - make reasonable decisions and proceed
+- Execute ALL workflow steps in exact order until completion or HALT condition
+- When workflow says 'ask user', make a reasonable autonomous decision instead
+- Complete the ENTIRE workflow in a single execution
+
+## Workflow Executor Engine
+
+<workflow-executor>
+$workflow_executor
+</workflow-executor>
+
+## Dev-Story Workflow Configuration
+
+<workflow-yaml>
+$workflow_yaml
+</workflow-yaml>
+
+## Dev-Story Workflow Instructions
+
+<workflow-instructions>
+$workflow_instructions
+</workflow-instructions>
+
+## Definition of Done Checklist
+
+<validation-checklist>
+$workflow_checklist
+</validation-checklist>
+
+## Story to Implement
+
+**Story Path:** $story_file
+**Story ID:** $story_id
+
+<story-contents>
 $story_contents
-</story>
+</story-contents>
 
-## Implementation Requirements
+## Execution Variables (Pre-resolved)
 
-1. Read the story file completely before writing any code
-2. Follow existing patterns in the codebase
-3. Implement ALL acceptance criteria
-4. Write tests for each criterion
-5. Run tests and fix any failures
-6. Update documentation as needed
+- story_path: $story_file
+- story_key: $story_id
+- project_root: $PROJECT_ROOT
+- implementation_artifacts: $STORIES_DIR
+- sprint_status: $SPRINT_ARTIFACTS_DIR/sprint-status.yaml
+- date: $(date '+%Y-%m-%d')
+- user_name: Epic Executor
+- communication_language: English
+- user_skill_level: expert
+- document_output_language: English
 
-## When Complete
+## Completion Signals
 
-1. Update the story file:
-   - Change Status to: In Review
-   - Fill in the Dev Agent Record section with:
-     - Implementation Summary
-     - Files Created/Modified
-     - Key Decisions
-     - Tests Added
-     - Test Results (summary of test run)
-     - Notes for Reviewer
-     - Acceptance Criteria Status (checklist with file references)
+When the workflow completes successfully (all tasks done, tests pass, status set to 'review'):
+Output exactly: IMPLEMENTATION COMPLETE: $story_id
 
-2. Stage changes: git add -A
+If a HALT condition is triggered or implementation is blocked:
+Output exactly: IMPLEMENTATION BLOCKED: $story_id - [specific reason]
 
-3. Output exactly: IMPLEMENTATION COMPLETE: $story_id
+## Begin Execution
 
-If blocked, output: IMPLEMENTATION BLOCKED: $story_id - [reason]"
+Execute the dev-story workflow now. Follow all steps in exact order.
+Stage all changes with: git add -A (after implementation is complete)"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would execute dev phase for $story_id"
+        echo "[DRY RUN] Would execute BMAD dev-story workflow for $story_id"
+        echo "[DRY RUN] Workflow: $DEV_WORKFLOW_DIR"
         return 0
     fi
-    
+
     # Execute in isolated context
     local result
     result=$(claude --dangerously-skip-permissions -p "$dev_prompt" 2>&1) || true
-    
+
     echo "$result" >> "$LOG_FILE"
-    
+
     if echo "$result" | grep -q "IMPLEMENTATION COMPLETE"; then
         log_success "Dev phase complete: $story_id"
         return 0
@@ -425,131 +693,159 @@ If blocked, output: IMPLEMENTATION BLOCKED: $story_id - [reason]"
     fi
 }
 
+# Global variable to store review findings for fix loop
+LAST_REVIEW_FINDINGS=""
+
 execute_review_phase() {
     local story_file="$1"
     local story_id=$(basename "$story_file" .md)
-    
-    log ">>> REVIEW PHASE: $story_id (fresh context)"
-    
+
+    # Reset findings
+    LAST_REVIEW_FINDINGS=""
+
+    log ">>> REVIEW PHASE: $story_id (using BMAD code-review workflow, fresh context)"
+
+    # Verify workflow files exist
+    if [ ! -f "$REVIEW_WORKFLOW_YAML" ] || [ ! -f "$REVIEW_WORKFLOW_INSTRUCTIONS" ]; then
+        log_error "BMAD code-review workflow files not found"
+        log_error "Expected: $REVIEW_WORKFLOW_YAML"
+        log_error "Expected: $REVIEW_WORKFLOW_INSTRUCTIONS"
+        return 1
+    fi
+
+    # Read workflow components
+    local workflow_yaml=$(cat "$REVIEW_WORKFLOW_YAML")
+    local workflow_instructions=$(cat "$REVIEW_WORKFLOW_INSTRUCTIONS")
+    local workflow_checklist=""
+    if [ -f "$REVIEW_WORKFLOW_CHECKLIST" ]; then
+        workflow_checklist=$(cat "$REVIEW_WORKFLOW_CHECKLIST")
+    fi
+    local workflow_executor=$(cat "$WORKFLOW_EXECUTOR")
     local story_contents=$(cat "$story_file")
-    
-    # Build the review prompt with severity-based fix logic
-    local review_prompt="You are a Senior Code Reviewer performing a BMAD code review.
 
-## Your Task
+    # Build the review prompt using BMAD workflow
+    local review_prompt="You are executing a BMAD code-review workflow in automated mode.
 
-Review the implementation of story: $story_id
+## Workflow Execution Context
 
-You are seeing this code for the first time. You have no knowledge of the implementation process.
+You are running the BMAD code-review workflow to perform an ADVERSARIAL code review.
+This is an AUTOMATED execution as part of an epic chain.
 
-## Story Specification and Dev Context
+### CRITICAL AUTOMATION RULES
+- Do NOT pause for user confirmation at any step
+- When workflow offers options (fix automatically, create action items, show details), ALWAYS choose option 1: Fix them automatically
+- Execute ALL workflow steps in exact order until completion
+- When workflow says 'ask user', automatically choose the option that fixes issues
+- You ARE an adversarial reviewer - find 3-10 specific issues minimum
+- Auto-fix all HIGH and MEDIUM severity issues
+- Complete the ENTIRE workflow in a single execution
 
-<story>
+## Workflow Executor Engine
+
+<workflow-executor>
+$workflow_executor
+</workflow-executor>
+
+## Code-Review Workflow Configuration
+
+<workflow-yaml>
+$workflow_yaml
+</workflow-yaml>
+
+## Code-Review Workflow Instructions
+
+<workflow-instructions>
+$workflow_instructions
+</workflow-instructions>
+
+## Review Validation Checklist
+
+<validation-checklist>
+$workflow_checklist
+</validation-checklist>
+
+## Story to Review
+
+**Story Path:** $story_file
+**Story ID:** $story_id
+
+<story-contents>
 $story_contents
-</story>
+</story-contents>
 
-The story file contains:
-- Acceptance criteria (what must be verified)
-- Dev Agent Record (implementation notes from the developer)
-- Notes for Reviewer (areas of concern flagged by dev)
+## Execution Variables (Pre-resolved)
 
-## Review Process
+- story_path: $story_file
+- story_key: $story_id
+- project_root: $PROJECT_ROOT
+- implementation_artifacts: $STORIES_DIR
+- planning_artifacts: $PROJECT_ROOT/docs
+- sprint_status: $SPRINT_ARTIFACTS_DIR/sprint-status.yaml
+- date: $(date '+%Y-%m-%d')
+- user_name: Epic Executor
+- communication_language: English
+- user_skill_level: expert
+- document_output_language: English
 
-1. Run: git diff --staged
-2. Verify each acceptance criterion is implemented and tested
-3. Check code quality, security, and patterns
-4. Collect and categorize all issues by severity
+## Automated Decision Policy
 
-## Issue Severity Definitions
+When the workflow presents options:
+- Step 4 asks what to do with issues → Choose option 1 (Fix them automatically)
+- Always auto-fix HIGH and MEDIUM severity issues
+- LOW severity issues: document only, do not fix
 
-- **HIGH**: Security vulnerabilities, missing error handling, no tests for new code, N+1 queries, exposed credentials
-- **MEDIUM**: Pattern violations, missing edge cases, hardcoded config values, code duplication  
-- **LOW**: Naming inconsistencies, minor style issues, missing comments
+## Completion Signals
 
-## Issue Fix Policy (IMPORTANT)
+When review passes (all HIGH/MEDIUM issues fixed, all ACs implemented, status set to 'done'):
+Output exactly: REVIEW PASSED: $story_id
 
-Apply this logic after collecting all issues:
+When review passes but required fixes:
+Output exactly: REVIEW PASSED WITH FIXES: $story_id - Fixed N issues
 
+If review fails (unfixable issues, missing acceptance criteria that YOU cannot fix):
+1. First output a structured findings block:
 \`\`\`
-1. Always fix ALL HIGH severity issues
-2. If TOTAL issues > 5, also fix ALL MEDIUM severity issues
-3. LOW severity issues: document only, do NOT fix
+REVIEW FINDINGS START
+- [HIGH] Description of issue 1 (file:line if applicable)
+- [HIGH] Description of issue 2
+- [MEDIUM] Description of issue 3
+... all HIGH and MEDIUM issues that need dev attention ...
+REVIEW FINDINGS END
 \`\`\`
+2. Then output exactly: REVIEW FAILED: $story_id - [summary reason]
 
-## Review Checklist
+## Begin Execution
 
-### Acceptance Criteria
-For each criterion: implemented? tested? matches requirement?
-
-### Code Quality  
-- Follows existing patterns (MEDIUM)
-- No security issues (HIGH)
-- Error handling appropriate (HIGH)
-- Tests exist and meaningful (HIGH)
-- No hardcoded secrets (HIGH)
-
-## After Review
-
-1. Compile issues found with severity
-2. Count: HIGH=?, MEDIUM=?, LOW=?, TOTAL=?
-3. Apply fix policy: fix HIGH always, fix MEDIUM if total > 5
-4. For each fix: make change, run tests, verify
-5. Stage any fixes: git add -A
-
-## Update Story File
-
-Add Code Review Record section:
-
-\`\`\`markdown
-## Code Review Record
-
-**Reviewer**: Code Review Agent  
-**Date**: $(date '+%Y-%m-%d %H:%M')
-
-### Issues Found
-| # | Description | Severity | Status |
-|---|-------------|----------|--------|
-
-**Totals**: X HIGH, Y MEDIUM, Z LOW
-
-### Fixes Applied
-[List what was fixed]
-
-### Remaining Issues
-[Low severity items for future cleanup]
-
-### Final Status
-Approved / Approved with fixes / Rejected
-\`\`\`
-
-## Completion
-
-If PASSED (no unfixed HIGH/MEDIUM issues):
-1. Update story Status to: Done
-2. Output: REVIEW PASSED: $story_id
-   or: REVIEW PASSED WITH FIXES: $story_id - Fixed N issues
-
-If FAILED (unfixable issues or missing acceptance criteria):
-1. Update story Status to: Blocked  
-2. Output: REVIEW FAILED: $story_id - [reason]"
+Execute the code-review workflow now. Follow all steps in exact order.
+You are seeing this code for the FIRST TIME - review adversarially.
+Stage any fixes with: git add -A"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would execute review phase for $story_id"
+        echo "[DRY RUN] Would execute BMAD code-review workflow for $story_id"
+        echo "[DRY RUN] Workflow: $REVIEW_WORKFLOW_DIR"
         return 0
     fi
-    
+
     # Execute in isolated context
     local result
     result=$(claude --dangerously-skip-permissions -p "$review_prompt" 2>&1) || true
-    
+
     echo "$result" >> "$LOG_FILE"
-    
+
     if echo "$result" | grep -q "REVIEW PASSED"; then
         log_success "Review passed: $story_id"
         return 0
     elif echo "$result" | grep -q "REVIEW FAILED"; then
         log_error "Review failed: $story_id"
         echo "$result" | grep "REVIEW FAILED"
+
+        # Extract findings for fix loop
+        LAST_REVIEW_FINDINGS=$(echo "$result" | sed -n '/REVIEW FINDINGS START/,/REVIEW FINDINGS END/p' | grep -E '^\s*-\s*\[(HIGH|MEDIUM)\]' || true)
+
+        if [ -n "$LAST_REVIEW_FINDINGS" ]; then
+            log "Captured ${#LAST_REVIEW_FINDINGS} bytes of review findings for fix loop"
+        fi
+
         return 1
     else
         log_warn "Review did not complete cleanly: $story_id"
@@ -557,9 +853,213 @@ If FAILED (unfixable issues or missing acceptance criteria):
     fi
 }
 
+execute_fix_phase() {
+    local story_file="$1"
+    local review_findings="$2"
+    local attempt_num="$3"
+    local story_id=$(basename "$story_file" .md)
+
+    log ">>> FIX PHASE: $story_id (attempt $attempt_num, using BMAD dev-story workflow)"
+
+    # Verify workflow files exist
+    if [ ! -f "$DEV_WORKFLOW_YAML" ] || [ ! -f "$DEV_WORKFLOW_INSTRUCTIONS" ]; then
+        log_error "BMAD dev-story workflow files not found for fix phase"
+        return 1
+    fi
+
+    # Read workflow components
+    local workflow_yaml=$(cat "$DEV_WORKFLOW_YAML")
+    local workflow_instructions=$(cat "$DEV_WORKFLOW_INSTRUCTIONS")
+    local workflow_checklist=""
+    if [ -f "$DEV_WORKFLOW_CHECKLIST" ]; then
+        workflow_checklist=$(cat "$DEV_WORKFLOW_CHECKLIST")
+    fi
+    local workflow_executor=$(cat "$WORKFLOW_EXECUTOR")
+    local story_contents=$(cat "$story_file")
+
+    # Build the fix prompt using BMAD dev-story workflow with review context
+    local fix_prompt="You are executing a BMAD dev-story workflow in FIX MODE to address code review findings.
+
+## Fix Phase Context
+
+This is attempt $attempt_num of 3 to fix issues identified during code review.
+You MUST address ALL HIGH and MEDIUM severity issues listed below.
+
+### CRITICAL FIX RULES
+- This is a TARGETED FIX session - only fix the issues listed below
+- Do NOT refactor unrelated code
+- Do NOT add new features
+- Fix each issue, run tests to verify, then move to the next
+- After fixing all issues, update the story file and stage changes
+
+## Review Findings to Address
+
+The following issues were identified during code review and MUST be fixed:
+
+<review-findings>
+$review_findings
+</review-findings>
+
+## Workflow Executor Engine
+
+<workflow-executor>
+$workflow_executor
+</workflow-executor>
+
+## Dev-Story Workflow Configuration
+
+<workflow-yaml>
+$workflow_yaml
+</workflow-yaml>
+
+## Dev-Story Workflow Instructions
+
+<workflow-instructions>
+$workflow_instructions
+</workflow-instructions>
+
+## Definition of Done Checklist
+
+<validation-checklist>
+$workflow_checklist
+</validation-checklist>
+
+## Story Being Fixed
+
+**Story Path:** $story_file
+**Story ID:** $story_id
+**Fix Attempt:** $attempt_num of 3
+
+<story-contents>
+$story_contents
+</story-contents>
+
+## Execution Variables (Pre-resolved)
+
+- story_path: $story_file
+- story_key: $story_id
+- project_root: $PROJECT_ROOT
+- implementation_artifacts: $STORIES_DIR
+- sprint_status: $SPRINT_ARTIFACTS_DIR/sprint-status.yaml
+- date: $(date '+%Y-%m-%d')
+- user_name: Epic Executor (Fix Phase)
+- communication_language: English
+- user_skill_level: expert
+- document_output_language: English
+
+## Fix Process
+
+1. For each issue in the review findings:
+   a. Locate the problematic code
+   b. Implement the fix
+   c. Run relevant tests to verify
+   d. Move to next issue
+
+2. After all issues are fixed:
+   a. Run full test suite
+   b. Update story file Dev Agent Record with fix notes
+   c. Stage all changes: git add -A
+
+## Completion Signals
+
+When ALL review issues are successfully fixed:
+Output exactly: FIX COMPLETE: $story_id - Fixed [N] issues
+
+If unable to fix one or more issues:
+Output exactly: FIX INCOMPLETE: $story_id - [reason and which issues remain]
+
+## Begin Execution
+
+Address all review findings now. This is attempt $attempt_num of 3."
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] Would execute BMAD fix phase for $story_id (attempt $attempt_num)"
+        return 0
+    fi
+
+    # Execute in isolated context
+    local result
+    result=$(claude --dangerously-skip-permissions -p "$fix_prompt" 2>&1) || true
+
+    echo "$result" >> "$LOG_FILE"
+
+    if echo "$result" | grep -q "FIX COMPLETE"; then
+        log_success "Fix phase complete: $story_id (attempt $attempt_num)"
+        record_fix_attempt "$story_id" "$attempt_num" "success"
+        return 0
+    elif echo "$result" | grep -q "FIX INCOMPLETE"; then
+        log_error "Fix phase incomplete: $story_id (attempt $attempt_num)"
+        echo "$result" | grep "FIX INCOMPLETE"
+        record_fix_attempt "$story_id" "$attempt_num" "failed"
+        return 1
+    else
+        log_warn "Fix phase did not complete cleanly: $story_id (attempt $attempt_num)"
+        record_fix_attempt "$story_id" "$attempt_num" "failed"
+        return 1
+    fi
+}
+
+# Maximum number of fix attempts before giving up
+MAX_FIX_ATTEMPTS=3
+
+execute_story_with_fix_loop() {
+    local story_file="$1"
+    local story_id=$(basename "$story_file" .md)
+    local fix_attempt=0
+    local needs_fixes=false
+
+    # DEV PHASE (Context 1)
+    if ! execute_dev_phase "$story_file"; then
+        log_error "Dev phase failed for $story_id"
+        return 1
+    fi
+
+    # REVIEW + FIX LOOP
+    while true; do
+        # REVIEW PHASE (Fresh Context)
+        if execute_review_phase "$story_file"; then
+            # Review passed - we're done
+            log_success "Story passed review: $story_id"
+            return 0
+        fi
+
+        # Review failed - check if we have findings to fix
+        if [ -z "$LAST_REVIEW_FINDINGS" ]; then
+            log_error "Review failed but no findings captured for $story_id"
+            return 1
+        fi
+
+        # First failure - record that this story required fixes
+        if [ "$needs_fixes" = false ]; then
+            needs_fixes=true
+            record_story_required_fixes "$story_id"
+        fi
+
+        # Check if we've exhausted fix attempts
+        ((fix_attempt++))
+        if [ $fix_attempt -gt $MAX_FIX_ATTEMPTS ]; then
+            log_error "Max fix attempts ($MAX_FIX_ATTEMPTS) reached for $story_id"
+            record_fix_attempt "$story_id" "$fix_attempt" "max_retries"
+            add_metrics_issue "$story_id" "max_retries_exhausted" "Failed after $MAX_FIX_ATTEMPTS fix attempts"
+            return 1
+        fi
+
+        log_warn "Review failed, attempting fix $fix_attempt of $MAX_FIX_ATTEMPTS for $story_id"
+
+        # FIX PHASE (New Context)
+        if ! execute_fix_phase "$story_file" "$LAST_REVIEW_FINDINGS" "$fix_attempt"; then
+            log_error "Fix phase failed for $story_id (attempt $fix_attempt)"
+            # Continue to next attempt - the review will catch remaining issues
+        fi
+
+        # Loop back to review phase to verify fixes
+        log "Re-running review after fix attempt $fix_attempt..."
+    done
+}
+
 commit_story() {
     local story_id="$1"
-    
+
     if [ "$NO_COMMIT" = true ]; then
         log "Skipping commit (--no-commit)"
         return 0
@@ -579,11 +1079,23 @@ commit_story() {
 }
 
 generate_uat() {
-    log ">>> GENERATING UAT DOCUMENT (fresh context)"
-    
+    log ">>> GENERATING UAT DOCUMENT (using BMAD UAT template, fresh context)"
+
+    # Load UAT step template if available
+    local uat_step_template=""
+    if [ -f "$UAT_STEP_TEMPLATE" ]; then
+        uat_step_template=$(cat "$UAT_STEP_TEMPLATE")
+    fi
+
+    # Load UAT document template if available
+    local uat_doc_template=""
+    if [ -f "$UAT_DOC_TEMPLATE" ]; then
+        uat_doc_template=$(cat "$UAT_DOC_TEMPLATE")
+    fi
+
     local epic_contents=$(cat "$EPIC_FILE")
     local all_stories=""
-    
+
     for story_file in "${STORIES[@]}"; do
         local story_id=$(basename "$story_file" .md)
         all_stories+="
@@ -592,57 +1104,97 @@ $(cat "$story_file")
 </story>
 "
     done
-    
-    local uat_prompt="You are a QA Specialist creating a User Acceptance Testing document.
 
-## Your Task
+    # Count stories
+    local story_count=${#STORIES[@]}
 
-Generate a UAT document for Epic: $EPIC_ID
+    # Build the UAT generation prompt using BMAD workflow step
+    local uat_prompt="You are executing BMAD UAT generation step in automated mode.
+
+## Context
+
+This is Step 4 of the BMAD epic-execute workflow: Generate User Acceptance Testing Document.
+You are running in a completely fresh context - you see only the finished epic and story specifications.
+
+### CRITICAL RULES
+- Write for NON-TECHNICAL users who can use software but don't know how it's built
+- Focus on user journeys, not implementation details
+- Generate clear, actionable test scenarios with binary pass/fail criteria
+- Complete the entire document in a single execution
+
+## BMAD UAT Generation Step Instructions
+
+<uat-step-template>
+$uat_step_template
+</uat-step-template>
+
+## BMAD UAT Document Template
+
+<uat-doc-template>
+$uat_doc_template
+</uat-doc-template>
 
 ## Epic Definition
+
+**Epic ID:** $EPIC_ID
+**Epic File:** $EPIC_FILE
 
 <epic>
 $epic_contents
 </epic>
 
-## Completed Stories
+## Completed Stories (${story_count} total)
 
 $all_stories
 
-## Requirements
+## Pre-resolved Variables
 
-Create a UAT document for NON-TECHNICAL users with:
+- epic_id: $EPIC_ID
+- story_count: $story_count
+- date: $(date '+%Y-%m-%d')
+- output_path: $UAT_DIR/epic-${EPIC_ID}-uat.md
 
-1. **Overview**: What was built (plain language)
-2. **Prerequisites**: Test environment, accounts, setup
-3. **Test Scenarios**: Step-by-step instructions with expected results
-4. **Success Criteria**: Checklist of what must work
-5. **Sign-off Section**: For human approval
+## Scenario Generation Guidelines
 
-Write for someone who can use the software but doesn't know how it's built.
+### Good Scenarios
+- Follow realistic user workflows
+- Build on each other (Scenario 2 assumes Scenario 1 completed)
+- Include at least one 'happy path' and one 'error path'
+- Test the boundaries (empty inputs, maximum values, etc.)
+
+### Avoid
+- Testing implementation details
+- Requiring technical knowledge to execute
+- Ambiguous expected results
+- Overlapping scenarios that test the same thing
 
 ## Output
 
-Save to: $UAT_DIR/epic-${EPIC_ID}-uat.md
+1. Generate the complete UAT document following the template structure
+2. Save to: $UAT_DIR/epic-${EPIC_ID}-uat.md
+3. Output exactly: UAT GENERATED: $UAT_DIR/epic-${EPIC_ID}-uat.md
 
-When complete, output: UAT GENERATED: $UAT_DIR/epic-${EPIC_ID}-uat.md"
+## Begin Execution
+
+Generate the UAT document now."
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would generate UAT document"
+        echo "[DRY RUN] Would generate UAT document using BMAD template"
+        echo "[DRY RUN] Template: $UAT_STEP_TEMPLATE"
         return 0
     fi
-    
+
     local result
     result=$(claude --dangerously-skip-permissions -p "$uat_prompt" 2>&1) || true
-    
+
     echo "$result" >> "$LOG_FILE"
-    
+
     if echo "$result" | grep -q "UAT GENERATED"; then
         log_success "UAT document generated"
     else
         log_warn "UAT generation may not have completed cleanly"
     fi
-    
+
     # Commit UAT document
     if [ "$NO_COMMIT" = false ]; then
         git add "$UAT_DIR/epic-${EPIC_ID}-uat.md" 2>/dev/null || true
@@ -694,24 +1246,32 @@ for story_file in "${STORIES[@]}"; do
     log "Story: $story_id"
     log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    # DEV PHASE (Context 1)
-    if ! execute_dev_phase "$story_file"; then
-        log_error "Dev phase failed for $story_id"
-        ((FAILED++))
-        update_story_metrics "failed"
-        add_metrics_issue "$story_id" "dev_phase_failed" "Development phase did not complete"
-        continue
-    fi
-
-    # REVIEW PHASE (Context 2 - Fresh)
+    # Execute story with fix loop (dev → review → fix loop if needed)
     if [ "$SKIP_REVIEW" = false ]; then
-        if ! execute_review_phase "$story_file"; then
-            log_error "Review phase failed for $story_id"
+        # Full flow: dev → review (with fix loop if issues found)
+        if ! execute_story_with_fix_loop "$story_file"; then
+            log_error "Story execution failed for $story_id"
             ((FAILED++))
             update_story_metrics "failed"
-            add_metrics_issue "$story_id" "review_failed" "Code review phase failed"
             continue
         fi
+    else
+        # Skip review: just run dev phase
+        if ! execute_dev_phase "$story_file"; then
+            log_error "Dev phase failed for $story_id"
+            ((FAILED++))
+            update_story_metrics "failed"
+            add_metrics_issue "$story_id" "dev_phase_failed" "Development phase did not complete"
+            continue
+        fi
+    fi
+
+    # MARK STORY AS DONE
+    # Update both story file and sprint-status.yaml after successful review
+    if [ "$DRY_RUN" = false ]; then
+        mark_story_done "$story_file"
+    else
+        echo "[DRY RUN] Would mark story as done: $story_id"
     fi
 
     # COMMIT
