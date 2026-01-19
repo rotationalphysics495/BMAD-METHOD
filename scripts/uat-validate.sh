@@ -289,6 +289,181 @@ classify_single_scenario() {
 }
 
 # =============================================================================
+# Section 5.5: Human Intervention Detection
+# =============================================================================
+
+# Arrays to store human intervention items
+declare -a HUMAN_INTERVENTION_BLOCKING
+declare -a HUMAN_INTERVENTION_WARNING
+
+# Patterns that indicate human intervention is required
+BLOCKING_PATTERNS=(
+    "EACCES|permission denied"
+    "\.env|environment variable|not set|undefined|not defined"
+    "API[_-]?KEY|SECRET|TOKEN.*required|missing|invalid"
+    "authentication failed|unauthorized|401|403"
+    "license|subscription|quota exceeded"
+    "EPERM|operation not permitted"
+    "credentials.*required|credentials.*missing"
+)
+
+WARNING_PATTERNS=(
+    "connection refused|ECONNREFUSED|ETIMEDOUT|timeout"
+    "check.*inbox|verify.*email|manual.*verification"
+    "relation.*does not exist|migration|table.*not found"
+    "deprecated|warning:"
+    "rate limit|throttl"
+    "service unavailable|503"
+    "could not connect|connection failed"
+)
+
+detect_human_intervention() {
+    local error_output="$1"
+    local scenario_id="$2"
+    local scenario_name="$3"
+
+    # Check for BLOCKING patterns
+    for pattern in "${BLOCKING_PATTERNS[@]}"; do
+        if echo "$error_output" | grep -qiE "$pattern"; then
+            local matched_line
+            matched_line=$(echo "$error_output" | grep -iE "$pattern" | head -1)
+            HUMAN_INTERVENTION_BLOCKING+=("$scenario_id|$scenario_name|$matched_line")
+            [ "$VERBOSE" = true ] && log_warn "  [BLOCKING] Detected: $matched_line"
+        fi
+    done
+
+    # Check for WARNING patterns
+    for pattern in "${WARNING_PATTERNS[@]}"; do
+        if echo "$error_output" | grep -qiE "$pattern"; then
+            local matched_line
+            matched_line=$(echo "$error_output" | grep -iE "$pattern" | head -1)
+            HUMAN_INTERVENTION_WARNING+=("$scenario_id|$scenario_name|$matched_line")
+            [ "$VERBOSE" = true ] && log_warn "  [WARNING] Detected: $matched_line"
+        fi
+    done
+}
+
+analyze_root_cause() {
+    local error_output="$1"
+    local exit_code="$2"
+
+    # Analyze error patterns and return a hint
+    if echo "$error_output" | grep -qiE "\.env|environment variable|not set"; then
+        echo "Missing environment configuration. Check .env file or .env.example for required variables."
+    elif echo "$error_output" | grep -qiE "API[_-]?KEY|SECRET|TOKEN"; then
+        echo "Missing or invalid API credentials. Verify API keys are correctly configured."
+    elif echo "$error_output" | grep -qiE "connection refused|ECONNREFUSED"; then
+        echo "Service connection failed. Ensure the required service is running (database, redis, etc.)."
+    elif echo "$error_output" | grep -qiE "relation.*does not exist|table.*not found"; then
+        echo "Database schema issue. Run migrations or check database setup."
+    elif echo "$error_output" | grep -qiE "permission denied|EACCES|EPERM"; then
+        echo "Permission issue. Check file/directory permissions or run with appropriate privileges."
+    elif echo "$error_output" | grep -qiE "timeout|ETIMEDOUT"; then
+        echo "Operation timed out. Check network connectivity or increase timeout."
+    elif [ "$exit_code" -eq 1 ]; then
+        echo "Command failed with exit code 1. Check the error output for specific details."
+    elif [ "$exit_code" -eq 124 ]; then
+        echo "Command timed out. Consider increasing timeout or checking for blocking operations."
+    else
+        echo "Analyze error output above. Exit code: $exit_code"
+    fi
+}
+
+# =============================================================================
+# Section 5.6: Story Context Extraction
+# =============================================================================
+
+extract_story_context() {
+    local epic_id="$1"
+    local output_file="$2"
+
+    log "Extracting story context for Epic $epic_id..."
+
+    # Find story files for this epic
+    local story_files=()
+    for pattern in "${epic_id}-" "epic-${epic_id}-" "0${epic_id}-"; do
+        while IFS= read -r -d '' file; do
+            story_files+=("$file")
+        done < <(find "$STORIES_DIR" -name "${pattern}*.md" -print0 2>/dev/null)
+    done
+
+    if [ ${#story_files[@]} -eq 0 ]; then
+        log_warn "No story files found for Epic $epic_id in $STORIES_DIR"
+        echo "No story files found for this epic." >> "$output_file"
+        return 1
+    fi
+
+    log "Found ${#story_files[@]} story file(s)"
+
+    echo "## Story Context" >> "$output_file"
+    echo "" >> "$output_file"
+
+    for story_file in "${story_files[@]}"; do
+        local story_name
+        story_name=$(basename "$story_file" .md)
+
+        echo "### $story_name" >> "$output_file"
+        echo "" >> "$output_file"
+
+        # Extract acceptance criteria section
+        local in_ac_section=false
+        local ac_content=""
+        while IFS= read -r line; do
+            # Detect start of acceptance criteria section
+            if echo "$line" | grep -qiE "^##.*[Aa]cceptance [Cc]riteria|^##.*AC"; then
+                in_ac_section=true
+                ac_content="**Acceptance Criteria:**"$'\n'
+                continue
+            fi
+            # Detect end of section (next ## header)
+            if [ "$in_ac_section" = true ] && echo "$line" | grep -qE "^##[^#]"; then
+                in_ac_section=false
+            fi
+            # Accumulate content
+            if [ "$in_ac_section" = true ]; then
+                ac_content+="$line"$'\n'
+            fi
+        done < "$story_file"
+
+        if [ -n "$ac_content" ]; then
+            echo "$ac_content" >> "$output_file"
+        else
+            echo "*No acceptance criteria section found in this story.*" >> "$output_file"
+        fi
+        echo "" >> "$output_file"
+
+        # Extract Dev Agent Record section (implementation notes)
+        local in_dar_section=false
+        local dar_content=""
+        while IFS= read -r line; do
+            # Detect start of Dev Agent Record section
+            if echo "$line" | grep -qiE "^##.*[Dd]ev [Aa]gent [Rr]ecord|^##.*Implementation [Nn]otes"; then
+                in_dar_section=true
+                dar_content="**Dev Agent Record (Implementation Notes):**"$'\n'
+                continue
+            fi
+            # Detect end of section (next ## header)
+            if [ "$in_dar_section" = true ] && echo "$line" | grep -qE "^##[^#]"; then
+                in_dar_section=false
+            fi
+            # Accumulate content
+            if [ "$in_dar_section" = true ]; then
+                dar_content+="$line"$'\n'
+            fi
+        done < "$story_file"
+
+        if [ -n "$dar_content" ]; then
+            echo "$dar_content" >> "$output_file"
+        fi
+        echo "" >> "$output_file"
+        echo "---" >> "$output_file"
+        echo "" >> "$output_file"
+    done
+
+    return 0
+}
+
+# =============================================================================
 # Section 6: Scenario Execution
 # =============================================================================
 
@@ -415,6 +590,8 @@ execute_single_scenario() {
         log_error "  Scenario $scenario_id: FAIL (timeout after ${TIMEOUT_SECONDS}s)"
         FAILED_SCENARIOS+=("$scenario_id")
         FAILED_DETAILS+=("$scenario_id|$scenario_name|$scenario_cmd|timeout|$exit_code|$output|$stderr")
+        # Detect human intervention needs from output
+        detect_human_intervention "$output$stderr" "$scenario_id" "$scenario_name"
     else
         log_error "  Scenario $scenario_id: FAIL (exit code $exit_code)"
         if [ -n "$stderr" ] && [ "$VERBOSE" = true ]; then
@@ -422,6 +599,8 @@ execute_single_scenario() {
         fi
         FAILED_SCENARIOS+=("$scenario_id")
         FAILED_DETAILS+=("$scenario_id|$scenario_name|$scenario_cmd|error|$exit_code|$output|$stderr")
+        # Detect human intervention needs from error output
+        detect_human_intervention "$output$stderr" "$scenario_id" "$scenario_name"
     fi
 
     return $exit_code
@@ -496,13 +675,51 @@ This document contains the context needed to fix UAT failures for Epic $epic_id.
 EOF
     fi
 
-    # Append failed scenarios details
+    # Add human intervention section
+    echo "" >> "$fix_file"
+    echo "## Human Intervention Items" >> "$fix_file"
+    echo "" >> "$fix_file"
+
+    if [ ${#HUMAN_INTERVENTION_BLOCKING[@]} -gt 0 ]; then
+        echo "### BLOCKING (likely requires human action)" >> "$fix_file"
+        echo "" >> "$fix_file"
+        for item in "${HUMAN_INTERVENTION_BLOCKING[@]}"; do
+            IFS='|' read -r scenario_id scenario_name matched_line <<< "$item"
+            echo "- [ ] **Scenario $scenario_id ($scenario_name):** $matched_line" >> "$fix_file"
+        done
+        echo "" >> "$fix_file"
+    fi
+
+    if [ ${#HUMAN_INTERVENTION_WARNING[@]} -gt 0 ]; then
+        echo "### WARNING (may need attention)" >> "$fix_file"
+        echo "" >> "$fix_file"
+        for item in "${HUMAN_INTERVENTION_WARNING[@]}"; do
+            IFS='|' read -r scenario_id scenario_name matched_line <<< "$item"
+            echo "- [ ] **Scenario $scenario_id ($scenario_name):** $matched_line" >> "$fix_file"
+        done
+        echo "" >> "$fix_file"
+    fi
+
+    if [ ${#HUMAN_INTERVENTION_BLOCKING[@]} -eq 0 ] && [ ${#HUMAN_INTERVENTION_WARNING[@]} -eq 0 ]; then
+        echo "*No human intervention items detected. All failures appear to be code-fixable.*" >> "$fix_file"
+        echo "" >> "$fix_file"
+    fi
+
+    echo "**Instructions for Barry:** Attempt to fix what you can. For items you cannot resolve programmatically, document them clearly in the fix commit message and update the human-actions file." >> "$fix_file"
+    echo "" >> "$fix_file"
+    echo "---" >> "$fix_file"
+
+    # Append failed scenarios details with root cause hints
     echo "" >> "$fix_file"
     echo "## Failed Scenarios" >> "$fix_file"
     echo "" >> "$fix_file"
 
     for detail in "${FAILED_DETAILS[@]}"; do
         IFS='|' read -r scenario_id scenario_name cmd error_type exit_code output stderr <<< "$detail"
+
+        # Generate root cause hint for this failure
+        local root_cause_hint
+        root_cause_hint=$(analyze_root_cause "$output$stderr" "$exit_code")
 
         cat >> "$fix_file" << EOF
 ### Scenario $scenario_id: $scenario_name
@@ -525,10 +742,16 @@ $output
 $stderr
 \`\`\`
 
+**Root Cause Hint:** $root_cause_hint
+
 ---
 
 EOF
     done
+
+    # Extract and append story context (acceptance criteria + dev agent record)
+    echo "" >> "$fix_file"
+    extract_story_context "$epic_id" "$fix_file"
 
     # Add context references section
     cat >> "$fix_file" << EOF
@@ -586,26 +809,47 @@ run_quick_dev_fix() {
 
     log "Spawning quick-dev fix session (attempt $attempt/$MAX_RETRIES)"
 
+    # Build human intervention summary for prompt
+    local human_intervention_note=""
+    if [ ${#HUMAN_INTERVENTION_BLOCKING[@]} -gt 0 ] || [ ${#HUMAN_INTERVENTION_WARNING[@]} -gt 0 ]; then
+        human_intervention_note="
+IMPORTANT: Some failures may require human intervention (marked in the fix context).
+- For items you CANNOT fix programmatically (missing API keys, .env configuration, etc.):
+  Document them clearly and proceed with what you CAN fix.
+- Do NOT attempt to create fake credentials or placeholder values.
+- Focus on code-level fixes that don't require external configuration."
+    fi
+
     local fix_prompt="You are Barry, the Quick Flow Solo Dev.
 
-Load and process this fix context document:
+FIRST: Read the fix context document at:
 $fix_context_file
 
-Your task:
-1. Read the failed scenarios and error details from the fix context
-2. Analyze root cause for each failure
-3. Implement targeted fixes
-4. Run the failing commands to verify fixes
-5. Stage changes: git add -A
-6. Commit with message: fix(epic-${epic_id}): UAT fix #${attempt}
+This document contains:
+1. Human Intervention Items - issues that may require human action
+2. Failed Scenarios - with commands, errors, and root cause hints
+3. Story Context - acceptance criteria and implementation notes from the original stories
 
+Your task:
+1. Read the fix context document completely before starting
+2. Review the Human Intervention Items section - note which issues you CAN vs CANNOT fix
+3. For each failed scenario:
+   a. Check the root cause hint
+   b. Review the related acceptance criteria
+   c. Implement targeted fixes for code-level issues
+4. Run the failing commands to verify your fixes work
+5. Stage changes: git add -A
+6. Commit with message: fix(epic-${epic_id}): UAT fix #${attempt} - {brief description}
+$human_intervention_note
 Constraints:
-- Only fix the identified failures
-- Do not refactor unrelated code
-- Run tests after fixes
+- Only fix the identified failures - do not refactor unrelated code
+- Run the specific failing commands to verify each fix
+- Run project tests after all fixes: npm test
+- If a fix requires external configuration (API keys, .env), document it but don't block on it
 
 When done, output exactly:
-FIX_COMPLETE: {number_fixed}/${#FAILED_SCENARIOS[@]}"
+FIX_COMPLETE: {number_fixed}/${#FAILED_SCENARIOS[@]}
+HUMAN_ACTION_NEEDED: {yes/no}"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY RUN] Would spawn Claude for fixes with prompt:"
@@ -621,11 +865,149 @@ FIX_COMPLETE: {number_fixed}/${#FAILED_SCENARIOS[@]}"
 
     if echo "$result" | grep -q "FIX_COMPLETE"; then
         log_success "Quick-dev fix session completed"
+        # Check if human action was flagged
+        if echo "$result" | grep -q "HUMAN_ACTION_NEEDED: yes"; then
+            log_warn "Barry indicated human action is needed for some issues"
+        fi
         return 0
     else
         log_warn "Quick-dev fix session may not have completed cleanly"
         return 1
     fi
+}
+
+generate_human_actions_file() {
+    local epic_id="$1"
+    local final_attempt="$2"
+
+    local human_actions_file="$FIX_DIR/epic-${epic_id}-human-actions.md"
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Only generate if there are human intervention items
+    if [ ${#HUMAN_INTERVENTION_BLOCKING[@]} -eq 0 ] && [ ${#HUMAN_INTERVENTION_WARNING[@]} -eq 0 ]; then
+        log "No human actions required"
+        return 0
+    fi
+
+    log "Generating human actions file: $human_actions_file"
+
+    cat > "$human_actions_file" << EOF
+# Human Actions Required - Epic $epic_id
+
+**Generated:** $timestamp
+**After:** Fix attempt $final_attempt of $MAX_RETRIES
+**UAT Result:** FAIL (${#PASSED_SCENARIOS[@]}/${#AUTOMATABLE_SCENARIOS[@]} scenarios passed)
+
+---
+
+## Required Actions
+
+The following items could not be automatically fixed and require human intervention.
+
+EOF
+
+    local action_num=0
+
+    # Add BLOCKING items
+    if [ ${#HUMAN_INTERVENTION_BLOCKING[@]} -gt 0 ]; then
+        for item in "${HUMAN_INTERVENTION_BLOCKING[@]}"; do
+            ((action_num++))
+            IFS='|' read -r scenario_id scenario_name matched_line <<< "$item"
+
+            cat >> "$human_actions_file" << EOF
+### $action_num. $scenario_name (Scenario $scenario_id)
+
+**Priority:** High (BLOCKING)
+**Issue:** $matched_line
+
+**Suggested Action:**
+EOF
+            # Add specific guidance based on pattern
+            if echo "$matched_line" | grep -qiE "\.env|environment variable"; then
+                cat >> "$human_actions_file" << EOF
+Check your \`.env\` file and ensure all required environment variables are set.
+Reference \`.env.example\` if available.
+
+EOF
+            elif echo "$matched_line" | grep -qiE "API[_-]?KEY|SECRET|TOKEN"; then
+                cat >> "$human_actions_file" << EOF
+Verify your API credentials are correctly configured.
+Check the service dashboard for valid keys.
+
+EOF
+            elif echo "$matched_line" | grep -qiE "permission denied|EACCES"; then
+                cat >> "$human_actions_file" << EOF
+Check file/directory permissions. You may need to run with elevated privileges
+or adjust ownership/permissions on the affected files.
+
+EOF
+            else
+                echo "Review the error message and take appropriate action." >> "$human_actions_file"
+                echo "" >> "$human_actions_file"
+            fi
+        done
+    fi
+
+    # Add WARNING items
+    if [ ${#HUMAN_INTERVENTION_WARNING[@]} -gt 0 ]; then
+        for item in "${HUMAN_INTERVENTION_WARNING[@]}"; do
+            ((action_num++))
+            IFS='|' read -r scenario_id scenario_name matched_line <<< "$item"
+
+            cat >> "$human_actions_file" << EOF
+### $action_num. $scenario_name (Scenario $scenario_id)
+
+**Priority:** Medium (WARNING)
+**Issue:** $matched_line
+
+**Suggested Action:**
+EOF
+            # Add specific guidance based on pattern
+            if echo "$matched_line" | grep -qiE "connection refused|ECONNREFUSED"; then
+                cat >> "$human_actions_file" << EOF
+Ensure the required service is running (database, Redis, etc.).
+Check service logs for startup errors.
+
+EOF
+            elif echo "$matched_line" | grep -qiE "inbox|email|manual.*verification"; then
+                cat >> "$human_actions_file" << EOF
+Manual verification required. Check the relevant inbox or UI to confirm
+the expected behavior.
+
+EOF
+            elif echo "$matched_line" | grep -qiE "migration|relation.*does not exist"; then
+                cat >> "$human_actions_file" << EOF
+Database schema may need updating. Run migrations:
+\`\`\`bash
+npm run db:migrate  # or your project's migration command
+\`\`\`
+
+EOF
+            else
+                echo "Review the warning and take appropriate action if needed." >> "$human_actions_file"
+                echo "" >> "$human_actions_file"
+            fi
+        done
+    fi
+
+    cat >> "$human_actions_file" << EOF
+
+---
+
+## After Completing Actions
+
+Re-run UAT validation:
+\`\`\`bash
+./scripts/uat-validate.sh $epic_id --gate-mode=$UAT_GATE_MODE
+\`\`\`
+
+---
+
+*Generated by UAT Validate Workflow*
+*BMAD Method - Epic Chain Self-Healing*
+EOF
+
+    echo "$human_actions_file"
 }
 
 self_healing_loop() {
@@ -637,9 +1019,21 @@ self_healing_loop() {
 
         log_section "Self-Healing Fix Loop (Attempt $attempt/$MAX_RETRIES)"
 
-        # Generate fix context
+        # Reset human intervention arrays for this attempt
+        HUMAN_INTERVENTION_BLOCKING=()
+        HUMAN_INTERVENTION_WARNING=()
+
+        # Generate fix context (this will detect human intervention items)
         local fix_file
         fix_file=$(generate_fix_context "$epic_id" "$attempt")
+
+        # Log human intervention summary
+        if [ ${#HUMAN_INTERVENTION_BLOCKING[@]} -gt 0 ]; then
+            log_warn "Detected ${#HUMAN_INTERVENTION_BLOCKING[@]} BLOCKING human intervention item(s)"
+        fi
+        if [ ${#HUMAN_INTERVENTION_WARNING[@]} -gt 0 ]; then
+            log_warn "Detected ${#HUMAN_INTERVENTION_WARNING[@]} WARNING human intervention item(s)"
+        fi
 
         # Run quick-dev fix
         if ! run_quick_dev_fix "$fix_file" "$epic_id" "$attempt"; then
@@ -649,7 +1043,7 @@ self_healing_loop() {
         # Re-run validation
         log "Re-validating after fix attempt $attempt..."
 
-        # Reset and re-execute
+        # Reset scenario results but preserve human intervention items
         PASSED_SCENARIOS=()
         FAILED_SCENARIOS=()
         FAILED_DETAILS=()
@@ -661,6 +1055,9 @@ self_healing_loop() {
 
         log_warn "UAT still failing after attempt $attempt"
     done
+
+    # Generate human actions file for remaining issues
+    generate_human_actions_file "$epic_id" "$MAX_RETRIES"
 
     log_error "Max retries ($MAX_RETRIES) exceeded"
     return 2
@@ -678,7 +1075,15 @@ update_metrics() {
     mkdir -p "$METRICS_DIR"
 
     local metrics_file="$METRICS_DIR/epic-${epic_id}-metrics.yaml"
-    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Calculate timing
+    local end_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local end_epoch=$(date +%s)
+    local duration_seconds=$((end_epoch - UAT_START_EPOCH))
+
+    # Calculate human intervention counts
+    local blocking_count=${#HUMAN_INTERVENTION_BLOCKING[@]}
+    local warning_count=${#HUMAN_INTERVENTION_WARNING[@]}
 
     # Check if yq is available for YAML manipulation
     if command -v yq >/dev/null 2>&1; then
@@ -688,7 +1093,11 @@ update_metrics() {
             yq -i ".validation.fix_attempts = $fix_attempts" "$metrics_file"
             yq -i ".validation.scenarios_passed = ${#PASSED_SCENARIOS[@]}" "$metrics_file"
             yq -i ".validation.scenarios_failed = ${#FAILED_SCENARIOS[@]}" "$metrics_file"
-            yq -i ".validation.timestamp = \"$timestamp\"" "$metrics_file"
+            yq -i ".validation.start_time = \"$UAT_START_TIME\"" "$metrics_file"
+            yq -i ".validation.end_time = \"$end_time\"" "$metrics_file"
+            yq -i ".validation.duration_seconds = $duration_seconds" "$metrics_file"
+            yq -i ".validation.human_intervention.blocking = $blocking_count" "$metrics_file"
+            yq -i ".validation.human_intervention.warning = $warning_count" "$metrics_file"
         else
             # Create new metrics file
             cat > "$metrics_file" << EOF
@@ -699,7 +1108,12 @@ validation:
   fix_attempts: $fix_attempts
   scenarios_passed: ${#PASSED_SCENARIOS[@]}
   scenarios_failed: ${#FAILED_SCENARIOS[@]}
-  timestamp: "$timestamp"
+  start_time: "$UAT_START_TIME"
+  end_time: "$end_time"
+  duration_seconds: $duration_seconds
+  human_intervention:
+    blocking: $blocking_count
+    warning: $warning_count
 EOF
         fi
     else
@@ -713,7 +1127,12 @@ validation:
   fix_attempts: $fix_attempts
   scenarios_passed: ${#PASSED_SCENARIOS[@]}
   scenarios_failed: ${#FAILED_SCENARIOS[@]}
-  timestamp: "$timestamp"
+  start_time: "$UAT_START_TIME"
+  end_time: "$end_time"
+  duration_seconds: $duration_seconds
+  human_intervention:
+    blocking: $blocking_count
+    warning: $warning_count
 EOF
         else
             # Simple append for validation section
@@ -722,6 +1141,7 @@ EOF
     fi
 
     log "Metrics updated: $metrics_file"
+    log "  Duration: ${duration_seconds}s"
 }
 
 output_signals() {
@@ -730,22 +1150,43 @@ output_signals() {
 
     local total=${#AUTOMATABLE_SCENARIOS[@]}
     local passed=${#PASSED_SCENARIOS[@]}
+    local human_action_count=$((${#HUMAN_INTERVENTION_BLOCKING[@]} + ${#HUMAN_INTERVENTION_WARNING[@]}))
+    local human_action_required="false"
+    [ $human_action_count -gt 0 ] && human_action_required="true"
 
     echo ""
     echo "UAT_GATE_RESULT: $gate_status"
     echo "UAT_FIX_ATTEMPTS: $fix_attempts"
     echo "UAT_SCENARIOS_PASSED: $passed/$total"
+    echo "UAT_HUMAN_ACTION_REQUIRED: $human_action_required"
+    echo "UAT_HUMAN_ACTION_COUNT: $human_action_count"
+    if [ "$human_action_required" = "true" ]; then
+        echo "UAT_HUMAN_ACTION_FILE: $FIX_DIR/epic-${EPIC_ID}-human-actions.md"
+    fi
 }
 
 print_summary() {
     local gate_status="$1"
     local fix_attempts="$2"
 
+    local human_action_count=$((${#HUMAN_INTERVENTION_BLOCKING[@]} + ${#HUMAN_INTERVENTION_WARNING[@]}))
+
+    # Calculate duration
+    local end_epoch=$(date +%s)
+    local duration_seconds=$((end_epoch - UAT_START_EPOCH))
+    local duration_display="${duration_seconds}s"
+    if [ $duration_seconds -ge 60 ]; then
+        local minutes=$((duration_seconds / 60))
+        local seconds=$((duration_seconds % 60))
+        duration_display="${minutes}m ${seconds}s"
+    fi
+
     log_header "UAT VALIDATION COMPLETE"
 
     echo "  Epic:              $EPIC_ID"
     echo "  Gate Mode:         $UAT_GATE_MODE"
     echo "  Gate Result:       $gate_status"
+    echo "  Duration:          $duration_display"
     echo ""
     echo "  Scenarios:"
     echo "    Automatable:     ${#AUTOMATABLE_SCENARIOS[@]}"
@@ -757,23 +1198,57 @@ print_summary() {
     echo "    Failed:          ${#FAILED_SCENARIOS[@]}"
     echo "    Fix Attempts:    $fix_attempts"
     echo ""
+    echo "  Human Intervention:"
+    echo "    Blocking Items:  ${#HUMAN_INTERVENTION_BLOCKING[@]}"
+    echo "    Warning Items:   ${#HUMAN_INTERVENTION_WARNING[@]}"
+    echo ""
     echo "  Artifacts:"
     echo "    Log:             $LOG_FILE"
     echo "    UAT Document:    $UAT_FILE"
     if [ ${#FAILED_SCENARIOS[@]} -gt 0 ] && [ -d "$FIX_DIR" ]; then
         echo "    Fix Contexts:    $FIX_DIR/"
     fi
+    if [ $human_action_count -gt 0 ]; then
+        echo "    Human Actions:   $FIX_DIR/epic-${EPIC_ID}-human-actions.md"
+    fi
     echo ""
+
+    # Print human intervention summary if any
+    if [ $human_action_count -gt 0 ]; then
+        echo -e "${YELLOW}${BOLD}  ⚠ Human Action Required:${NC}"
+        if [ ${#HUMAN_INTERVENTION_BLOCKING[@]} -gt 0 ]; then
+            echo -e "    ${RED}BLOCKING:${NC}"
+            for item in "${HUMAN_INTERVENTION_BLOCKING[@]}"; do
+                IFS='|' read -r scenario_id scenario_name matched_line <<< "$item"
+                echo "      - Scenario $scenario_id: $matched_line"
+            done
+        fi
+        if [ ${#HUMAN_INTERVENTION_WARNING[@]} -gt 0 ]; then
+            echo -e "    ${YELLOW}WARNING:${NC}"
+            for item in "${HUMAN_INTERVENTION_WARNING[@]}"; do
+                IFS='|' read -r scenario_id scenario_name matched_line <<< "$item"
+                echo "      - Scenario $scenario_id: $matched_line"
+            done
+        fi
+        echo ""
+        echo "  See $FIX_DIR/epic-${EPIC_ID}-human-actions.md for details."
+        echo ""
+    fi
 }
 
 # =============================================================================
 # Main Execution
 # =============================================================================
 
+# Capture UAT evaluation start time
+UAT_START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+UAT_START_EPOCH=$(date +%s)
+
 log_header "UAT VALIDATION: Epic $EPIC_ID"
 log "Gate mode: $UAT_GATE_MODE"
 log "Max retries: $MAX_RETRIES"
 log "Timeout: ${TIMEOUT_SECONDS}s"
+log "Started: $UAT_START_TIME"
 
 # Ensure directories exist
 mkdir -p "$METRICS_DIR"
