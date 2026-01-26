@@ -15,6 +15,7 @@
 #   --skip-arch     Skip architecture compliance check
 #   --skip-test-quality  Skip test quality review
 #   --skip-traceability  Skip traceability check (not recommended)
+#   --skip-static-analysis  Skip static analysis gate (runs real tooling)
 #
 
 set -e
@@ -26,6 +27,15 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BMAD_DIR="$PROJECT_ROOT/bmad"
+
+# =============================================================================
+# Source Modular Components
+# =============================================================================
+
+LIB_DIR="$SCRIPT_DIR/epic-execute-lib"
+[ -f "$LIB_DIR/decision-log.sh" ] && source "$LIB_DIR/decision-log.sh"
+[ -f "$LIB_DIR/regression-gate.sh" ] && source "$LIB_DIR/regression-gate.sh"
+[ -f "$LIB_DIR/design-phase.sh" ] && source "$LIB_DIR/design-phase.sh"
 
 STORIES_DIR="$PROJECT_ROOT/docs/stories"
 SPRINT_ARTIFACTS_DIR="$PROJECT_ROOT/docs/sprint-artifacts"
@@ -369,6 +379,9 @@ SKIP_DONE=false
 SKIP_ARCH=false
 SKIP_TEST_QUALITY=false
 SKIP_TRACEABILITY=false
+SKIP_STATIC_ANALYSIS=false
+SKIP_DESIGN=false
+SKIP_REGRESSION=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -412,6 +425,18 @@ while [[ $# -gt 0 ]]; do
             SKIP_TRACEABILITY=true
             shift
             ;;
+        --skip-static-analysis)
+            SKIP_STATIC_ANALYSIS=true
+            shift
+            ;;
+        --skip-design)
+            SKIP_DESIGN=true
+            shift
+            ;;
+        --skip-regression)
+            SKIP_REGRESSION=true
+            shift
+            ;;
         -*)
             echo "Unknown option: $1"
             exit 1
@@ -437,6 +462,9 @@ if [ -z "$EPIC_ID" ]; then
     echo "  --skip-arch     Skip architecture compliance check"
     echo "  --skip-test-quality  Skip test quality review"
     echo "  --skip-traceability  Skip traceability check (not recommended)"
+    echo "  --skip-static-analysis  Skip static analysis gate (runs real tooling)"
+    echo "  --skip-design     Skip pre-implementation design phase"
+    echo "  --skip-regression Skip regression test gate"
     exit 1
 fi
 
@@ -508,6 +536,16 @@ mkdir -p "$SPRINTS_DIR"
 EPIC_START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EPIC_START_SECONDS=$(date +%s)
 init_metrics
+
+# Initialize decision log (if module loaded)
+if type init_decision_log >/dev/null 2>&1; then
+    init_decision_log
+fi
+
+# Initialize regression baseline (if module loaded and not skipped)
+if [ "$SKIP_REGRESSION" = false ] && type init_regression_baseline >/dev/null 2>&1; then
+    init_regression_baseline
+fi
 
 # Find epic file (supports both epic-39-*.md and epic-039-*.md formats)
 EPIC_FILE=""
@@ -623,6 +661,18 @@ execute_dev_phase() {
     local workflow_executor=$(cat "$WORKFLOW_EXECUTOR")
     local story_contents=$(cat "$story_file")
 
+    # Get decision log context if available
+    local decision_context=""
+    if type get_decision_log_context >/dev/null 2>&1; then
+        decision_context=$(get_decision_log_context)
+    fi
+
+    # Get design context if available (from design phase)
+    local design_context=""
+    if type build_design_context_for_dev >/dev/null 2>&1; then
+        design_context=$(build_design_context_for_dev "$story_id")
+    fi
+
     # Build the dev prompt using BMAD workflow
     local dev_prompt="You are executing a BMAD dev-story workflow in automated mode.
 
@@ -670,6 +720,12 @@ $workflow_checklist
 <story-contents>
 $story_contents
 </story-contents>
+$design_context
+## Previous Implementation Context
+
+<decision-log>
+$decision_context
+</decision-log>
 
 ## Execution Variables (Pre-resolved)
 
@@ -886,6 +942,7 @@ execute_fix_phase() {
     local story_file="$1"
     local review_findings="$2"
     local attempt_num="$3"
+    local static_analysis_context="${4:-}"  # Optional: real tooling output
     local story_id=$(basename "$story_file" .md)
 
     log ">>> FIX PHASE: $story_id (attempt $attempt_num, using BMAD dev-story workflow)"
@@ -905,6 +962,19 @@ execute_fix_phase() {
     fi
     local workflow_executor=$(cat "$WORKFLOW_EXECUTOR")
     local story_contents=$(cat "$story_file")
+
+    # Build real tooling output section if available
+    local tooling_section=""
+    if [ -n "$static_analysis_context" ]; then
+        tooling_section="
+## Actual Tooling Output
+
+The following are REAL errors from running the project's tooling (not AI-generated).
+These must be fixed first as they represent actual compilation/test failures:
+
+$static_analysis_context
+"
+    fi
 
     # Build the fix prompt using BMAD dev-story workflow with review context
     local fix_prompt="You are executing a BMAD dev-story workflow in FIX MODE to address code review findings.
@@ -928,7 +998,7 @@ The following issues were identified during code review and MUST be fixed:
 <review-findings>
 $review_findings
 </review-findings>
-
+$tooling_section
 ## Workflow Executor Engine
 
 <workflow-executor>
@@ -1028,11 +1098,255 @@ Address all review findings now. This is attempt $attempt_num of 3."
     fi
 }
 
+# =============================================================================
+# Static Analysis Gate - Real Tooling Verification
+# =============================================================================
+
+execute_static_analysis_gate() {
+    local story_file="$1"
+    local story_id=$(basename "$story_file" .md)
+    local failures=0
+    local failure_details=""
+
+    # Reset failures
+    LAST_STATIC_ANALYSIS_FAILURES=""
+
+    log ">>> STATIC ANALYSIS GATE: $story_id (running real tooling)"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] Would run static analysis gate for $story_id"
+        return 0
+    fi
+
+    # Detect project type and run appropriate checks
+    if [ -f "$PROJECT_ROOT/package.json" ]; then
+        log "Detected Node.js/TypeScript project"
+
+        # 1. Type checking (catches type errors AI might miss)
+        if grep -q '"typecheck"\|"type-check"\|"tsc"' "$PROJECT_ROOT/package.json" 2>/dev/null; then
+            log "Running type check..."
+            local typecheck_output
+            typecheck_output=$(cd "$PROJECT_ROOT" && npm run typecheck 2>&1) || {
+                local exit_code=$?
+                log_error "Type check failed (exit code: $exit_code)"
+                failure_details+="
+### Type Check Failures
+\`\`\`
+$typecheck_output
+\`\`\`
+"
+                ((failures++))
+            }
+            echo "$typecheck_output" >> "$LOG_FILE"
+        elif [ -f "$PROJECT_ROOT/tsconfig.json" ]; then
+            # Fallback: run tsc directly if tsconfig exists
+            log "Running tsc directly..."
+            local tsc_output
+            tsc_output=$(cd "$PROJECT_ROOT" && npx tsc --noEmit 2>&1) || {
+                local exit_code=$?
+                log_error "TypeScript compilation failed (exit code: $exit_code)"
+                failure_details+="
+### TypeScript Compilation Failures
+\`\`\`
+$tsc_output
+\`\`\`
+"
+                ((failures++))
+            }
+            echo "$tsc_output" >> "$LOG_FILE"
+        fi
+
+        # 2. Linting (catches code style/quality issues)
+        if grep -q '"lint"' "$PROJECT_ROOT/package.json" 2>/dev/null; then
+            log "Running lint..."
+            local lint_output
+            lint_output=$(cd "$PROJECT_ROOT" && npm run lint 2>&1) || {
+                local exit_code=$?
+                log_error "Lint failed (exit code: $exit_code)"
+                failure_details+="
+### Lint Failures
+\`\`\`
+$lint_output
+\`\`\`
+"
+                ((failures++))
+            }
+            echo "$lint_output" >> "$LOG_FILE"
+        fi
+
+        # 3. Build (catches compilation errors)
+        if grep -q '"build"' "$PROJECT_ROOT/package.json" 2>/dev/null; then
+            log "Running build..."
+            local build_output
+            build_output=$(cd "$PROJECT_ROOT" && npm run build 2>&1) || {
+                local exit_code=$?
+                log_error "Build failed (exit code: $exit_code)"
+                failure_details+="
+### Build Failures
+\`\`\`
+$build_output
+\`\`\`
+"
+                ((failures++))
+            }
+            echo "$build_output" >> "$LOG_FILE"
+        fi
+
+        # 4. Tests (catches actual test failures)
+        if grep -q '"test"' "$PROJECT_ROOT/package.json" 2>/dev/null; then
+            log "Running tests..."
+            local test_output
+            test_output=$(cd "$PROJECT_ROOT" && npm test 2>&1) || {
+                local exit_code=$?
+                log_error "Tests failed (exit code: $exit_code)"
+                failure_details+="
+### Test Failures
+\`\`\`
+$test_output
+\`\`\`
+"
+                ((failures++))
+            }
+            echo "$test_output" >> "$LOG_FILE"
+        fi
+
+    elif [ -f "$PROJECT_ROOT/Cargo.toml" ]; then
+        log "Detected Rust project"
+
+        # Cargo check (type checking)
+        log "Running cargo check..."
+        local cargo_output
+        cargo_output=$(cd "$PROJECT_ROOT" && cargo check 2>&1) || {
+            log_error "Cargo check failed"
+            failure_details+="
+### Cargo Check Failures
+\`\`\`
+$cargo_output
+\`\`\`
+"
+            ((failures++))
+        }
+        echo "$cargo_output" >> "$LOG_FILE"
+
+        # Cargo test
+        log "Running cargo test..."
+        local test_output
+        test_output=$(cd "$PROJECT_ROOT" && cargo test 2>&1) || {
+            log_error "Cargo tests failed"
+            failure_details+="
+### Cargo Test Failures
+\`\`\`
+$test_output
+\`\`\`
+"
+            ((failures++))
+        }
+        echo "$test_output" >> "$LOG_FILE"
+
+    elif [ -f "$PROJECT_ROOT/go.mod" ]; then
+        log "Detected Go project"
+
+        # Go build
+        log "Running go build..."
+        local build_output
+        build_output=$(cd "$PROJECT_ROOT" && go build ./... 2>&1) || {
+            log_error "Go build failed"
+            failure_details+="
+### Go Build Failures
+\`\`\`
+$build_output
+\`\`\`
+"
+            ((failures++))
+        }
+        echo "$build_output" >> "$LOG_FILE"
+
+        # Go test
+        log "Running go test..."
+        local test_output
+        test_output=$(cd "$PROJECT_ROOT" && go test ./... 2>&1) || {
+            log_error "Go tests failed"
+            failure_details+="
+### Go Test Failures
+\`\`\`
+$test_output
+\`\`\`
+"
+            ((failures++))
+        }
+        echo "$test_output" >> "$LOG_FILE"
+
+    elif [ -f "$PROJECT_ROOT/requirements.txt" ] || [ -f "$PROJECT_ROOT/pyproject.toml" ]; then
+        log "Detected Python project"
+
+        # pytest
+        if command -v pytest >/dev/null 2>&1; then
+            log "Running pytest..."
+            local test_output
+            test_output=$(cd "$PROJECT_ROOT" && pytest 2>&1) || {
+                log_error "Pytest failed"
+                failure_details+="
+### Pytest Failures
+\`\`\`
+$test_output
+\`\`\`
+"
+                ((failures++))
+            }
+            echo "$test_output" >> "$LOG_FILE"
+        fi
+
+        # mypy (if available)
+        if command -v mypy >/dev/null 2>&1 && [ -f "$PROJECT_ROOT/mypy.ini" ] || [ -f "$PROJECT_ROOT/setup.cfg" ]; then
+            log "Running mypy..."
+            local mypy_output
+            mypy_output=$(cd "$PROJECT_ROOT" && mypy . 2>&1) || {
+                log_error "Mypy type check failed"
+                failure_details+="
+### Mypy Type Check Failures
+\`\`\`
+$mypy_output
+\`\`\`
+"
+                ((failures++))
+            }
+            echo "$mypy_output" >> "$LOG_FILE"
+        fi
+
+    else
+        log_warn "No recognized project type found - skipping static analysis"
+        return 0
+    fi
+
+    # Check results
+    if [ $failures -gt 0 ]; then
+        log_error "Static analysis gate failed with $failures issue(s)"
+
+        # Store failures for fix phase
+        LAST_STATIC_ANALYSIS_FAILURES="## Static Analysis Failures for $story_id
+
+The following REAL tooling failures were detected. These are NOT AI-generated - they are actual errors from running the project's tooling.
+
+$failure_details
+
+## Instructions
+
+Fix ALL the errors shown above. These are real compilation/test failures that must be resolved."
+
+        add_metrics_issue "$story_id" "static_analysis_failed" "Static analysis gate failed with $failures issue(s)"
+        return 1
+    fi
+
+    log_success "Static analysis gate passed: $story_id"
+    return 0
+}
+
 # Maximum number of fix attempts before giving up
 MAX_FIX_ATTEMPTS=3
 MAX_ARCH_FIX_ATTEMPTS=2
 MAX_TEST_QUALITY_FIX_ATTEMPTS=2
 MAX_TRACEABILITY_FIX_ATTEMPTS=3
+MAX_STATIC_ANALYSIS_FIX_ATTEMPTS=3
 
 # Global variable to store arch violations for fix loop
 LAST_ARCH_VIOLATIONS=""
@@ -1042,6 +1356,9 @@ LAST_TEST_QUALITY_ISSUES=""
 
 # Global variable to store traceability gaps for fix loop
 LAST_TRACEABILITY_GAPS=""
+
+# Global variable to store static analysis failures for fix loop
+LAST_STATIC_ANALYSIS_FAILURES=""
 
 execute_arch_compliance_phase() {
     local story_file="$1"
@@ -1534,10 +1851,49 @@ execute_story_with_fix_loop() {
     local test_quality_fix_attempt=0
     local needs_fixes=false
 
+    # DESIGN PHASE (Context 0) - Pre-implementation planning
+    if [ "$SKIP_DESIGN" = false ] && type execute_design_phase >/dev/null 2>&1; then
+        if ! execute_design_phase "$story_file"; then
+            log_warn "Design phase did not complete cleanly for $story_id - proceeding to dev"
+            # Don't fail - design is advisory
+        fi
+    fi
+
     # DEV PHASE (Context 1)
     if ! execute_dev_phase "$story_file"; then
         log_error "Dev phase failed for $story_id"
         return 1
+    fi
+
+    # STATIC ANALYSIS GATE (Real Tooling) - Per Story
+    local static_analysis_fix_attempt=0
+    if [ "$SKIP_STATIC_ANALYSIS" = false ]; then
+        while true; do
+            if execute_static_analysis_gate "$story_file"; then
+                log_success "Static analysis passed: $story_id"
+                break
+            fi
+
+            # Check if we have failures to fix
+            if [ -z "$LAST_STATIC_ANALYSIS_FAILURES" ]; then
+                log_warn "Static analysis unclear, proceeding anyway"
+                break
+            fi
+
+            ((static_analysis_fix_attempt++))
+            if [ $static_analysis_fix_attempt -gt $MAX_STATIC_ANALYSIS_FIX_ATTEMPTS ]; then
+                log_error "Max static analysis fix attempts ($MAX_STATIC_ANALYSIS_FIX_ATTEMPTS) reached for $story_id"
+                add_metrics_issue "$story_id" "static_analysis_max_retries" "Static analysis failures after $MAX_STATIC_ANALYSIS_FIX_ATTEMPTS attempts"
+                # Fail the story - real tooling errors must be fixed
+                return 1
+            fi
+
+            log_warn "Static analysis failed, attempting fix $static_analysis_fix_attempt of $MAX_STATIC_ANALYSIS_FIX_ATTEMPTS"
+            # Use the regular fix phase with static analysis context
+            if ! execute_fix_phase "$story_file" "$LAST_STATIC_ANALYSIS_FAILURES" "$static_analysis_fix_attempt"; then
+                log_warn "Static analysis fix incomplete, re-running gate..."
+            fi
+        done
     fi
 
     # ARCHITECTURE COMPLIANCE CHECK (Context 2) - Per Story
@@ -1640,6 +1996,16 @@ execute_story_with_fix_loop() {
                 log_warn "Test quality fix incomplete, continuing..."
             fi
         done
+    fi
+
+    # REGRESSION GATE (if module loaded and not skipped)
+    if [ "$SKIP_REGRESSION" = false ] && type execute_regression_gate >/dev/null 2>&1; then
+        if ! execute_regression_gate "$story_id"; then
+            log_error "Regression detected in $story_id"
+            add_metrics_issue "$story_id" "regression_detected" "Test count decreased after implementation"
+            # Don't fail the story - regression is a warning that should be investigated
+            log_warn "Proceeding despite regression - investigate manually"
+        fi
     fi
 
     return 0
