@@ -110,6 +110,7 @@ BMAD_DIR="$PROJECT_ROOT/bmad"
 # =============================================================================
 
 LIB_DIR="$SCRIPT_DIR/epic-execute-lib"
+[ -f "$LIB_DIR/utils.sh" ] && source "$LIB_DIR/utils.sh"
 [ -f "$LIB_DIR/decision-log.sh" ] && source "$LIB_DIR/decision-log.sh"
 [ -f "$LIB_DIR/regression-gate.sh" ] && source "$LIB_DIR/regression-gate.sh"
 [ -f "$LIB_DIR/design-phase.sh" ] && source "$LIB_DIR/design-phase.sh"
@@ -537,7 +538,13 @@ update_story_status() {
     # Update Status field in story file using sed
     # Matches "Status: <anything>" and replaces with "Status: <new_status>"
     if grep -q "^Status:" "$story_file"; then
-        sed -i.bak "s/^Status:.*$/Status: $new_status/" "$story_file" && rm -f "${story_file}.bak"
+        # Use cross-platform sed function if available, fallback to direct sed
+        if type sed_inplace >/dev/null 2>&1; then
+            sed_inplace "s/^Status:.*$/Status: $new_status/" "$story_file"
+        else
+            # Fallback: use backup and remove approach
+            sed -i.bak "s/^Status:.*$/Status: $new_status/" "$story_file" && rm -f "${story_file}.bak"
+        fi
         log_success "Updated story file status: $story_id → $new_status"
     else
         log_warn "No Status field found in story file: $story_id"
@@ -594,7 +601,13 @@ update_sprint_status() {
         # Fallback: use sed for simple replacement
         # This handles the format: "  1-2-user-auth: in-progress"
         if grep -q "^[[:space:]]*${story_key}:" "$sprint_file"; then
-            sed -i.bak "s/^\([[:space:]]*${story_key}:\).*/\1 $new_status/" "$sprint_file" && rm -f "${sprint_file}.bak"
+            # Use cross-platform sed function if available
+            if type sed_inplace >/dev/null 2>&1; then
+                sed_inplace "s/^\([[:space:]]*${story_key}:\).*/\1 $new_status/" "$sprint_file"
+            else
+                # Fallback: use backup and remove approach
+                sed -i.bak "s/^\([[:space:]]*${story_key}:\).*/\1 $new_status/" "$sprint_file" && rm -f "${sprint_file}.bak"
+            fi
             log_success "Updated sprint status: $story_key → $new_status (via sed)"
         else
             [ "$VERBOSE" = true ] && log_warn "Story key '$story_key' not found in sprint-status.yaml (sed fallback)"
@@ -804,6 +817,18 @@ validate_workflows() {
 }
 
 validate_workflows
+
+# Initialize utility module (M1-M5 fixes)
+if type init_utils >/dev/null 2>&1; then
+    init_utils
+fi
+
+# Check branch protection (M5) - prevent commits to main/master
+if [ "$NO_COMMIT" != true ] && type check_branch_protection >/dev/null 2>&1; then
+    if ! check_branch_protection; then
+        exit 1
+    fi
+fi
 
 # Ensure directories exist
 mkdir -p "$UAT_DIR"

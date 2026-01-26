@@ -1,0 +1,463 @@
+#!/bin/bash
+#
+# BMAD Epic Execute - Utility Functions Module
+#
+# Provides shared utility functions for reliability and cross-platform support:
+# - M1: Retry logic with exponential backoff
+# - M2: yq version validation
+# - M3: Fuzzy completion signal detection
+# - M4: Cross-platform sed
+# - M5: Branch protection check
+#
+# Usage: Sourced by epic-execute.sh
+#
+
+# =============================================================================
+# M1: Retry Logic with Exponential Backoff
+# =============================================================================
+
+# Default retry configuration
+RETRY_MAX_ATTEMPTS="${RETRY_MAX_ATTEMPTS:-3}"
+RETRY_INITIAL_DELAY="${RETRY_INITIAL_DELAY:-5}"
+RETRY_MAX_DELAY="${RETRY_MAX_DELAY:-60}"
+
+# Execute a command with retry logic and exponential backoff
+# Arguments:
+#   $1 - max attempts (optional, default: RETRY_MAX_ATTEMPTS)
+#   $2 - initial delay in seconds (optional, default: RETRY_INITIAL_DELAY)
+#   $@ - command and arguments to execute
+# Returns: Exit code of the command, or 1 if all retries failed
+execute_with_retry() {
+    local max_attempts="${1:-$RETRY_MAX_ATTEMPTS}"
+    local delay="${2:-$RETRY_INITIAL_DELAY}"
+    shift 2
+
+    local attempt=1
+    local result=""
+    local exit_code=0
+
+    while [ $attempt -le $max_attempts ]; do
+        # Execute the command and capture result
+        result=$("$@" 2>&1)
+        exit_code=$?
+
+        if [ $exit_code -eq 0 ]; then
+            echo "$result"
+            return 0
+        fi
+
+        # Check if this is a retryable error (transient failures)
+        local is_retryable=false
+        case "$result" in
+            *"rate limit"*|*"Rate limit"*|*"429"*)
+                is_retryable=true
+                [ "$VERBOSE" = true ] && log_warn "Rate limited, retrying..."
+                ;;
+            *"timeout"*|*"Timeout"*|*"ETIMEDOUT"*)
+                is_retryable=true
+                [ "$VERBOSE" = true ] && log_warn "Timeout, retrying..."
+                ;;
+            *"connection"*|*"Connection"*|*"ECONNREFUSED"*|*"ECONNRESET"*)
+                is_retryable=true
+                [ "$VERBOSE" = true ] && log_warn "Connection error, retrying..."
+                ;;
+            *"temporarily unavailable"*|*"503"*|*"502"*)
+                is_retryable=true
+                [ "$VERBOSE" = true ] && log_warn "Service temporarily unavailable, retrying..."
+                ;;
+        esac
+
+        if [ "$is_retryable" = false ]; then
+            # Non-retryable error, return immediately
+            echo "$result"
+            return $exit_code
+        fi
+
+        if [ $attempt -lt $max_attempts ]; then
+            log_warn "Attempt $attempt/$max_attempts failed. Retrying in ${delay}s..."
+            sleep "$delay"
+
+            # Exponential backoff with cap
+            delay=$((delay * 2))
+            if [ $delay -gt $RETRY_MAX_DELAY ]; then
+                delay=$RETRY_MAX_DELAY
+            fi
+        fi
+        ((attempt++))
+    done
+
+    log_error "All $max_attempts attempts failed"
+    echo "$result"
+    return 1
+}
+
+# Execute Claude prompt with retry logic
+# Arguments:
+#   $1 - prompt
+#   $2 - optional timeout (default: CLAUDE_TIMEOUT)
+# Returns: Claude's response or error
+execute_claude_with_retry() {
+    local prompt="$1"
+    local timeout="${2:-${CLAUDE_TIMEOUT:-600}}"
+
+    # Wrapper function for retry
+    _claude_invoke() {
+        timeout "$timeout" claude --dangerously-skip-permissions -p "$1" 2>&1
+        local code=$?
+        if [ $code -eq 124 ]; then
+            echo "TIMEOUT: Claude invocation timed out after ${timeout}s"
+            return 124
+        fi
+        return $code
+    }
+
+    execute_with_retry "$RETRY_MAX_ATTEMPTS" "$RETRY_INITIAL_DELAY" _claude_invoke "$prompt"
+}
+
+# =============================================================================
+# M2: yq Version Validation
+# =============================================================================
+
+# Global flag for yq availability and version
+YQ_AVAILABLE=false
+YQ_VERSION=""
+
+# Validate yq installation and version
+# Returns: 0 if valid yq (mikefarah Go version), 1 otherwise
+validate_yq() {
+    if ! command -v yq >/dev/null 2>&1; then
+        log_warn "yq not installed - YAML updates will use sed fallback"
+        return 1
+    fi
+
+    local version_output
+    version_output=$(yq --version 2>&1 || echo "")
+
+    # Check if it's the Go version (mikefarah/yq) which we expect
+    if echo "$version_output" | grep -qE "(mikefarah|version.*v4|version.*4\.)"; then
+        YQ_VERSION="go"
+        YQ_AVAILABLE=true
+        return 0
+    fi
+
+    # Python yq has different syntax (kislyuk/yq)
+    if echo "$version_output" | grep -qE "(jq wrapper|kislyuk)"; then
+        log_warn "Python yq detected (kislyuk/yq) - using sed fallback"
+        log_warn "For full YAML support, install: brew install yq (macOS) or go install github.com/mikefarah/yq/v4@latest"
+        YQ_VERSION="python"
+        return 1
+    fi
+
+    # Unknown version
+    log_warn "Unknown yq version - YAML updates may fail"
+    log_warn "Version output: $version_output"
+    YQ_VERSION="unknown"
+    return 1
+}
+
+# Safe yq operation with fallback
+# Arguments:
+#   $1 - yq operation (e.g., ".field = value")
+#   $2 - file path
+# Returns: 0 on success, 1 on failure
+safe_yq() {
+    local operation="$1"
+    local file="$2"
+
+    if [ "$YQ_AVAILABLE" = true ]; then
+        yq -i "$operation" "$file" 2>/dev/null && return 0
+    fi
+
+    # yq not available or failed, return 1 to indicate fallback needed
+    return 1
+}
+
+# =============================================================================
+# M3: Fuzzy Completion Signal Detection
+# =============================================================================
+
+# Check phase completion with fuzzy matching
+# Arguments:
+#   $1 - Full Claude output
+#   $2 - Phase type (dev, review, fix, arch, test_quality, trace, uat)
+#   $3 - Story ID (for legacy text matching)
+# Returns: 0 if complete/passed, 1 if failed/blocked, 2 if unclear
+check_phase_completion_fuzzy() {
+    local output="$1"
+    local phase_type="$2"
+    local story_id="$3"
+
+    # Try JSON parsing first (unless legacy mode)
+    if [ "$USE_LEGACY_OUTPUT" != true ]; then
+        local json_result
+        json_result=$(extract_json_result "$output" 2>/dev/null || echo "")
+
+        if [ -n "$json_result" ]; then
+            local status
+            status=$(get_result_status "$json_result" 2>/dev/null || echo "")
+
+            # Normalize status to uppercase
+            status=$(echo "$status" | tr '[:lower:]' '[:upper:]')
+
+            case "$status" in
+                COMPLETE|PASSED|COMPLIANT|APPROVED|SUCCESS|DONE|OK)
+                    return 0
+                    ;;
+                BLOCKED|FAILED|VIOLATIONS|CONCERNS|ERROR|INCOMPLETE|REJECTED)
+                    return 1
+                    ;;
+            esac
+        fi
+    fi
+
+    # Fuzzy text matching fallback (case-insensitive)
+    # Convert output to lowercase for matching
+    local output_lower
+    output_lower=$(echo "$output" | tr '[:upper:]' '[:lower:]')
+
+    case "$phase_type" in
+        dev)
+            # Success patterns
+            if echo "$output_lower" | grep -qE "(implementation|dev(elopment)?|story).*(complete|done|finish|success|implement)"; then
+                return 0
+            fi
+            # Failure patterns
+            if echo "$output_lower" | grep -qE "(implementation|dev(elopment)?).*(block|fail|error|cannot|unable|halt)"; then
+                return 1
+            fi
+            # Explicit legacy signals (case-sensitive)
+            if echo "$output" | grep -q "IMPLEMENTATION COMPLETE"; then
+                return 0
+            fi
+            if echo "$output" | grep -q "IMPLEMENTATION BLOCKED"; then
+                return 1
+            fi
+            ;;
+        review)
+            # Success patterns
+            if echo "$output_lower" | grep -qE "review.*(pass|approv|success|complete|clean|good|lgtm)"; then
+                return 0
+            fi
+            # Failure patterns
+            if echo "$output_lower" | grep -qE "review.*(fail|reject|issue|problem|concern|block)"; then
+                return 1
+            fi
+            # Explicit legacy signals
+            if echo "$output" | grep -q "REVIEW PASSED"; then
+                return 0
+            fi
+            if echo "$output" | grep -q "REVIEW FAILED"; then
+                return 1
+            fi
+            ;;
+        fix)
+            # Success patterns
+            if echo "$output_lower" | grep -qE "(fix|repair|resolve).*(complete|done|success|all|finish)"; then
+                return 0
+            fi
+            # Failure patterns
+            if echo "$output_lower" | grep -qE "(fix|repair).*(fail|incomplete|partial|cannot|unable|remain)"; then
+                return 1
+            fi
+            # Explicit legacy signals
+            if echo "$output" | grep -q "FIX COMPLETE"; then
+                return 0
+            fi
+            if echo "$output" | grep -q "FIX INCOMPLETE"; then
+                return 1
+            fi
+            ;;
+        arch)
+            # Success patterns
+            if echo "$output_lower" | grep -qE "(arch|architecture).*(compliant|pass|conform|valid|ok|good)"; then
+                return 0
+            fi
+            # Failure patterns
+            if echo "$output_lower" | grep -qE "(arch|architecture).*(violation|fail|non-compliant|issue|problem)"; then
+                return 1
+            fi
+            # Explicit legacy signals
+            if echo "$output" | grep -q "ARCH COMPLIANT"; then
+                return 0
+            fi
+            if echo "$output" | grep -q "ARCH VIOLATIONS"; then
+                return 1
+            fi
+            ;;
+        test_quality)
+            # Success patterns (including concerns which don't block)
+            if echo "$output_lower" | grep -qE "test.*quality.*(approv|pass|good|accept|meets)"; then
+                return 0
+            fi
+            if echo "$output" | grep -qE "TEST QUALITY (APPROVED|CONCERNS)"; then
+                return 0
+            fi
+            # Failure patterns
+            if echo "$output_lower" | grep -qE "test.*quality.*(fail|reject|below|poor|unaccept)"; then
+                return 1
+            fi
+            if echo "$output" | grep -q "TEST QUALITY FAILED"; then
+                return 1
+            fi
+            ;;
+        trace|traceability)
+            # Success patterns (including concerns which don't block)
+            if echo "$output_lower" | grep -qE "trace.*((pass|complete|valid|good|100%)|concerns?)"; then
+                return 0
+            fi
+            if echo "$output" | grep -qE "TRACEABILITY (PASS|CONCERNS)"; then
+                return 0
+            fi
+            # Failure patterns
+            if echo "$output_lower" | grep -qE "trace.*(fail|gap|missing|incomplete)"; then
+                return 1
+            fi
+            if echo "$output" | grep -q "TRACEABILITY FAIL"; then
+                return 1
+            fi
+            ;;
+        uat)
+            # Success patterns
+            if echo "$output_lower" | grep -qE "uat.*(generat|creat|complete|success|done)"; then
+                return 0
+            fi
+            if echo "$output" | grep -q "UAT GENERATED"; then
+                return 0
+            fi
+            ;;
+        test_gen)
+            # Success patterns
+            if echo "$output_lower" | grep -qE "test.*(generat|creat).*(complete|success|done)"; then
+                return 0
+            fi
+            if echo "$output" | grep -q "TEST GENERATION COMPLETE"; then
+                return 0
+            fi
+            # Partial failure
+            if echo "$output" | grep -q "TEST GENERATION PARTIAL"; then
+                return 1
+            fi
+            ;;
+    esac
+
+    # Unclear result
+    return 2
+}
+
+# =============================================================================
+# M4: Cross-Platform sed -i
+# =============================================================================
+
+# Cross-platform sed in-place edit
+# Handles macOS (BSD sed) vs Linux (GNU sed) differences
+# Arguments:
+#   $1 - sed pattern
+#   $2 - file path
+# Returns: 0 on success, non-zero on failure
+sed_inplace() {
+    local pattern="$1"
+    local file="$2"
+
+    if [ ! -f "$file" ]; then
+        log_error "sed_inplace: File not found: $file"
+        return 1
+    fi
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS/BSD sed requires '' after -i for no backup
+        sed -i '' "$pattern" "$file"
+    else
+        # GNU sed (Linux)
+        sed -i "$pattern" "$file"
+    fi
+}
+
+# Cross-platform sed in-place with backup
+# Arguments:
+#   $1 - sed pattern
+#   $2 - file path
+#   $3 - backup extension (optional, default: .bak)
+# Returns: 0 on success, non-zero on failure
+sed_inplace_backup() {
+    local pattern="$1"
+    local file="$2"
+    local backup_ext="${3:-.bak}"
+
+    if [ ! -f "$file" ]; then
+        log_error "sed_inplace_backup: File not found: $file"
+        return 1
+    fi
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS/BSD sed
+        sed -i "$backup_ext" "$pattern" "$file"
+    else
+        # GNU sed (Linux)
+        sed -i"$backup_ext" "$pattern" "$file"
+    fi
+}
+
+# =============================================================================
+# M5: Branch Protection Check
+# =============================================================================
+
+# List of protected branches (can be overridden via environment)
+PROTECTED_BRANCHES="${PROTECTED_BRANCHES:-main master}"
+
+# Check if current branch is protected
+# Returns: 0 if safe to commit, 1 if protected branch
+check_branch_protection() {
+    if [ ! -d "$PROJECT_ROOT/.git" ]; then
+        # Not a git repo, nothing to check
+        return 0
+    fi
+
+    local current_branch
+    current_branch=$(git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || \
+                     git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || \
+                     echo "")
+
+    if [ -z "$current_branch" ]; then
+        log_warn "Cannot determine current branch - proceeding with caution"
+        return 0
+    fi
+
+    # Check against protected branches
+    for protected in $PROTECTED_BRANCHES; do
+        if [ "$current_branch" = "$protected" ]; then
+            log_error "Cannot commit directly to protected branch: $current_branch"
+            log_error "Create a feature branch first:"
+            log_error "  git checkout -b epic-${EPIC_ID:-new}"
+            log_error ""
+            log_error "Or bypass protection with: PROTECTED_BRANCHES='' $0 ..."
+            return 1
+        fi
+    done
+
+    log "Working on branch: $current_branch"
+    return 0
+}
+
+# Get current branch name
+get_current_branch() {
+    git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || \
+    git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || \
+    echo ""
+}
+
+# =============================================================================
+# Initialization
+# =============================================================================
+
+# Initialize utilities when sourced
+init_utils() {
+    # Validate yq
+    validate_yq || true
+
+    # Log platform info in verbose mode
+    if [ "$VERBOSE" = true ]; then
+        log "Platform: $OSTYPE"
+        log "yq available: $YQ_AVAILABLE (version: ${YQ_VERSION:-none})"
+        log "Protected branches: $PROTECTED_BRANCHES"
+    fi
+}

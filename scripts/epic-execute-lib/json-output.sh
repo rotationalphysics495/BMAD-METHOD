@@ -24,6 +24,7 @@ LAST_JSON_RESULT=""
 
 # Extract JSON result block from Claude output
 # Looks for ```json ... ``` or ```result ... ``` blocks
+# Uses awk for more robust extraction (handles multiple blocks, nested backticks)
 # Arguments:
 #   $1 - Full Claude output
 # Returns: JSON string or empty if not found
@@ -33,33 +34,61 @@ extract_json_result() {
     # Reset last result
     LAST_JSON_RESULT=""
 
-    # Try to extract JSON from code block (```json ... ```)
-    local json_block
-    json_block=$(echo "$output" | sed -n '/```json/,/```/p' | sed '1d;$d')
+    local json_block=""
 
-    # If no ```json block, try ```result block
+    # Method 1: Extract last ```json block using awk (handles multiple blocks)
+    # This is more robust than sed for complex outputs
+    json_block=$(echo "$output" | awk '
+        /```json/ { capture=1; content=""; next }
+        /```/ && capture { last=content; capture=0; next }
+        capture { content = content (content ? "\n" : "") $0 }
+        END { print last }
+    ')
+
+    # Method 2: Fallback to ```result block
     if [ -z "$json_block" ]; then
-        json_block=$(echo "$output" | sed -n '/```result/,/```/p' | sed '1d;$d')
+        json_block=$(echo "$output" | awk '
+            /```result/ { capture=1; content=""; next }
+            /```/ && capture { last=content; capture=0; next }
+            capture { content = content (content ? "\n" : "") $0 }
+            END { print last }
+        ')
     fi
 
-    # If still no block, try to find raw JSON object at end of output
+    # Method 3: Legacy sed approach (simpler cases)
     if [ -z "$json_block" ]; then
-        # Look for JSON object pattern {"status": ...}
-        json_block=$(echo "$output" | grep -oE '\{"status":[^}]+\}' | tail -1)
+        json_block=$(echo "$output" | sed -n '/```json/,/```/p' | sed '1d;$d')
+    fi
+
+    # Method 4: Find standalone JSON object with status field
+    if [ -z "$json_block" ]; then
+        # Look for JSON object pattern {"status": ...} - capture full object
+        json_block=$(echo "$output" | grep -oE '\{[^{}]*"status"[^{}]*\}' | tail -1)
     fi
 
     # Validate JSON if jq is available
-    if [ -n "$json_block" ] && command -v jq >/dev/null 2>&1; then
-        if echo "$json_block" | jq . >/dev/null 2>&1; then
+    if [ -n "$json_block" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            if echo "$json_block" | jq . >/dev/null 2>&1; then
+                LAST_JSON_RESULT="$json_block"
+                echo "$json_block"
+                return 0
+            else
+                # JSON invalid - try to extract just the status object
+                local simple_json
+                simple_json=$(echo "$json_block" | jq -c '{status: .status, story_id: .story_id, summary: .summary}' 2>/dev/null || echo "")
+                if [ -n "$simple_json" ]; then
+                    LAST_JSON_RESULT="$simple_json"
+                    echo "$simple_json"
+                    return 0
+                fi
+            fi
+        else
+            # jq not available, return raw block
             LAST_JSON_RESULT="$json_block"
             echo "$json_block"
             return 0
         fi
-    elif [ -n "$json_block" ]; then
-        # jq not available, return raw block
-        LAST_JSON_RESULT="$json_block"
-        echo "$json_block"
-        return 0
     fi
 
     echo ""
@@ -238,14 +267,33 @@ check_phase_completion() {
             local status
             status=$(get_result_status "$json_result")
 
+            # Normalize status to uppercase for comparison
+            status=$(echo "$status" | tr '[:lower:]' '[:upper:]')
+
             case "$status" in
-                COMPLETE|PASSED|COMPLIANT|APPROVED)
+                COMPLETE|PASSED|COMPLIANT|APPROVED|SUCCESS|DONE|OK)
                     return 0
                     ;;
-                BLOCKED|FAILED|VIOLATIONS|CONCERNS)
+                BLOCKED|FAILED|VIOLATIONS|ERROR|INCOMPLETE|REJECTED)
+                    return 1
+                    ;;
+                CONCERNS)
+                    # Concerns typically don't block for test_quality and trace
+                    if [ "$phase_type" = "test_quality" ] || [ "$phase_type" = "trace" ]; then
+                        return 0
+                    fi
                     return 1
                     ;;
             esac
+        fi
+    fi
+
+    # Try fuzzy matching from utils module if available (M3 improvement)
+    if type check_phase_completion_fuzzy >/dev/null 2>&1; then
+        check_phase_completion_fuzzy "$output" "$phase_type" "$story_id"
+        local fuzzy_result=$?
+        if [ $fuzzy_result -ne 2 ]; then
+            return $fuzzy_result
         fi
     fi
 

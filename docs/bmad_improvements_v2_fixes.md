@@ -460,7 +460,9 @@ build_prompt_with_limit() {
 
 Issues that affect quality and reliability. **Recommended for quality.**
 
-### M1. No Retry Logic for Transient Failures
+### M1. No Retry Logic for Transient Failures ✅ DONE
+
+> **Implemented in `scripts/epic-execute-lib/utils.sh`** - Added `execute_with_retry()` with exponential backoff, `execute_claude_with_retry()` wrapper, configurable via `RETRY_MAX_ATTEMPTS`, `RETRY_INITIAL_DELAY`, `RETRY_MAX_DELAY`.
 
 **Problem:** Network issues, Claude rate limits, or temporary failures cause immediate failure without retry.
 
@@ -496,7 +498,9 @@ result=$(execute_with_retry 3 5 timeout "$CLAUDE_TIMEOUT" claude --dangerously-s
 
 ---
 
-### M2. yq Dependency Version Incompatibility
+### M2. yq Dependency Version Incompatibility ✅ DONE
+
+> **Implemented in `scripts/epic-execute-lib/utils.sh`** - Added `validate_yq()` to detect Go vs Python yq versions, `YQ_AVAILABLE` flag, `safe_yq()` wrapper with fallback support.
 
 **File:** `scripts/epic-execute.sh:164`
 
@@ -533,7 +537,9 @@ fi
 
 ---
 
-### M3. Completion Signal Detection Is Unreliable
+### M3. Completion Signal Detection Is Unreliable ✅ DONE
+
+> **Implemented in `scripts/epic-execute-lib/utils.sh`** - Added `check_phase_completion_fuzzy()` with case-insensitive pattern matching for all phases (dev, review, fix, arch, test_quality, trace, uat). Enhanced `check_phase_completion()` in json-output.sh to use fuzzy matching as fallback.
 
 **File:** `scripts/epic-execute-lib/json-output.sh:253-313`
 
@@ -587,7 +593,9 @@ check_phase_completion() {
 
 ---
 
-### M4. sed -i Not Portable
+### M4. sed -i Not Portable ✅ DONE
+
+> **Implemented in `scripts/epic-execute-lib/utils.sh`** - Added `sed_inplace()` and `sed_inplace_backup()` functions that detect `$OSTYPE` and use correct syntax for macOS (BSD sed) vs Linux (GNU sed). Updated `update_story_status()` and `update_sprint_status()` in epic-execute.sh to use these functions.
 
 **File:** `scripts/epic-execute.sh:289`
 
@@ -616,7 +624,9 @@ sed_inplace "s/^Status:.*$/Status: $new_status/" "$story_file"
 
 ---
 
-### M5. No Branch Protection
+### M5. No Branch Protection ✅ DONE
+
+> **Implemented in `scripts/epic-execute-lib/utils.sh`** - Added `check_branch_protection()` that checks current branch against `PROTECTED_BRANCHES` (default: "main master"). Exits with error if on protected branch. Called during initialization in epic-execute.sh (skipped if `--no-commit`).
 
 **Problem:** Script commits directly to current branch without checking if it's protected (main/master).
 
@@ -1190,31 +1200,48 @@ Output: TEST QUALITY FAILED: $story_id - Score: N/100"
 | W3 | Test Quality + Test-Review | Medium | Better test quality detection |
 | W4 | Traceability + Trace Workflow | Medium | Consistent traceability format |
 
-### Phase 4: Medium/Low Priority (As Time Permits)
+### Phase 4: Medium Priority ✅ COMPLETE
+
+| ID | Improvement | Effort | Status |
+|----|-------------|--------|--------|
+| M1 | Retry Logic | Medium | ✅ Done |
+| M2 | yq Version Check | Low | ✅ Done |
+| M3 | Fuzzy Completion Detection | Medium | ✅ Done |
+| M4 | Cross-platform sed | Low | ✅ Done |
+| M5 | Branch Protection | Low | ✅ Done |
+
+### Phase 5: Low Priority (As Time Permits)
 
 | ID | Improvement | Effort |
 |----|-------------|--------|
-| M1 | Retry Logic | Medium |
-| M2 | yq Version Check | Low |
-| M3 | Fuzzy Completion Detection | Medium |
-| M4 | Cross-platform sed | Low |
-| M5 | Branch Protection | Low |
 | L1-L5 | UX Improvements | Low-Medium |
 
 ---
 
 ## Conclusion
 
-The epic-execute library has a solid architecture with multi-phase validation and self-healing fix loops. However, several issues can cause silent failures or unreliable behavior:
+The epic-execute library has a solid architecture with multi-phase validation and self-healing fix loops. The following improvements have been implemented:
 
-1. **Critical Issues (5)** - Must be fixed to ensure basic reliability
-2. **BMAD Integration Gaps (4)** - Custom prompts should leverage existing workflows for consistency
-3. **High/Medium Issues (10)** - Should be addressed for production-quality execution
+### Completed
+- ✅ **High-Priority Issues (5)** - All fixed (H1-H5) in commit `ce2f9fb3`
+- ✅ **Medium-Priority Issues (5)** - All fixed (M1-M5) via new `utils.sh` module
 
-The recommended approach is:
-1. Fix all Critical issues first (estimated: 1-2 days)
-2. Address High-priority issues (estimated: 1-2 days)
-3. Integrate BMAD workflows into lib modules (estimated: 2-3 days)
-4. Address remaining improvements incrementally
+### Remaining
+- ⏳ **Critical Issues (5)** - Must be fixed to ensure basic reliability
+- ⏳ **BMAD Integration Gaps (4)** - Custom prompts should leverage existing workflows for consistency
+- ⏳ **Low-Priority Issues (5)** - UX improvements for better usability
 
-This will transform the epic-execute script from a working prototype into a production-ready automation tool.
+### Implementation Summary
+
+**New Module: `scripts/epic-execute-lib/utils.sh`**
+- M1: `execute_with_retry()` - Exponential backoff for transient failures
+- M2: `validate_yq()` - Detects Go vs Python yq versions
+- M3: `check_phase_completion_fuzzy()` - Case-insensitive pattern matching
+- M4: `sed_inplace()` / `sed_inplace_backup()` - Cross-platform sed
+- M5: `check_branch_protection()` - Prevents commits to main/master
+
+**Updated Files:**
+- `scripts/epic-execute.sh` - Sources utils.sh, uses cross-platform sed, branch protection on startup
+- `scripts/epic-execute-lib/json-output.sh` - Enhanced JSON extraction, fuzzy matching fallback
+
+The epic-execute script is now more reliable with better error handling, cross-platform support, and safety checks.
