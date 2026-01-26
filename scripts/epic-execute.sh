@@ -12,6 +12,9 @@
 #   --verbose       Show detailed output
 #   --start-from ID Start from a specific story (e.g., 31-2)
 #   --skip-done     Skip stories with Status: Done
+#   --skip-arch     Skip architecture compliance check
+#   --skip-test-quality  Skip test quality review
+#   --skip-traceability  Skip traceability check (not recommended)
 #
 
 set -e
@@ -59,6 +62,14 @@ WORKFLOW_EXECUTOR="$CORE_TASKS_DIR/workflow.xml"
 # UAT Generation (from epic-execute workflow)
 UAT_STEP_TEMPLATE="$WORKFLOWS_DIR/epic-execute/steps/step-04-generate-uat.md"
 UAT_DOC_TEMPLATE="$WORKFLOWS_DIR/epic-execute/templates/uat-template.md"
+
+# New Quality Gate Steps
+ARCH_COMPLIANCE_STEP="$WORKFLOWS_DIR/epic-execute/steps/step-02b-arch-compliance.md"
+TEST_QUALITY_STEP="$WORKFLOWS_DIR/epic-execute/steps/step-03b-test-quality.md"
+TRACEABILITY_STEP="$WORKFLOWS_DIR/epic-execute/steps/step-03c-traceability.md"
+
+# Traceability output directory
+TRACEABILITY_DIR="$PROJECT_ROOT/docs/sprint-artifacts/traceability"
 
 # Colors for output
 RED='\033[0;31m'
@@ -355,6 +366,9 @@ PARALLEL=false
 VERBOSE=false
 START_FROM=""
 SKIP_DONE=false
+SKIP_ARCH=false
+SKIP_TEST_QUALITY=false
+SKIP_TRACEABILITY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -386,6 +400,18 @@ while [[ $# -gt 0 ]]; do
             SKIP_DONE=true
             shift
             ;;
+        --skip-arch)
+            SKIP_ARCH=true
+            shift
+            ;;
+        --skip-test-quality)
+            SKIP_TEST_QUALITY=true
+            shift
+            ;;
+        --skip-traceability)
+            SKIP_TRACEABILITY=true
+            shift
+            ;;
         -*)
             echo "Unknown option: $1"
             exit 1
@@ -408,6 +434,9 @@ if [ -z "$EPIC_ID" ]; then
     echo "  --verbose       Detailed output"
     echo "  --start-from ID Start from a specific story (e.g., 31-2)"
     echo "  --skip-done     Skip stories with Status: Done"
+    echo "  --skip-arch     Skip architecture compliance check"
+    echo "  --skip-test-quality  Skip test quality review"
+    echo "  --skip-traceability  Skip traceability check (not recommended)"
     exit 1
 fi
 
@@ -1001,11 +1030,508 @@ Address all review findings now. This is attempt $attempt_num of 3."
 
 # Maximum number of fix attempts before giving up
 MAX_FIX_ATTEMPTS=3
+MAX_ARCH_FIX_ATTEMPTS=2
+MAX_TEST_QUALITY_FIX_ATTEMPTS=2
+MAX_TRACEABILITY_FIX_ATTEMPTS=3
+
+# Global variable to store arch violations for fix loop
+LAST_ARCH_VIOLATIONS=""
+
+# Global variable to store test quality issues for fix loop
+LAST_TEST_QUALITY_ISSUES=""
+
+# Global variable to store traceability gaps for fix loop
+LAST_TRACEABILITY_GAPS=""
+
+execute_arch_compliance_phase() {
+    local story_file="$1"
+    local story_id=$(basename "$story_file" .md)
+
+    # Reset violations
+    LAST_ARCH_VIOLATIONS=""
+
+    log ">>> ARCH COMPLIANCE: $story_id (fresh context)"
+
+    # Load architecture file
+    local arch_file=""
+    for search_path in "$PROJECT_ROOT/docs/architecture.md" "$PROJECT_ROOT/docs/architecture/architecture.md" "$PROJECT_ROOT/architecture.md"; do
+        if [ -f "$search_path" ]; then
+            arch_file="$search_path"
+            break
+        fi
+    done
+
+    if [ -z "$arch_file" ]; then
+        log_warn "No architecture.md found - skipping compliance check"
+        return 0
+    fi
+
+    local arch_contents=$(cat "$arch_file")
+    local story_contents=$(cat "$story_file")
+
+    # Load step template if available
+    local step_template=""
+    if [ -f "$ARCH_COMPLIANCE_STEP" ]; then
+        step_template=$(cat "$ARCH_COMPLIANCE_STEP")
+    fi
+
+    local arch_prompt="You are an Architecture Compliance Validator executing a BMAD compliance check.
+
+## Your Task
+
+Validate architecture compliance for story: $story_id
+
+You are checking the staged changes against the project's established architecture patterns.
+This is a TARGETED CHECK - focus only on structural/architectural issues, not code quality.
+
+### CRITICAL AUTOMATION RULES
+- Do NOT pause for user confirmation
+- Execute the full compliance check
+- Fix HIGH severity violations automatically
+- Document MEDIUM and LOW violations
+
+## Architecture Reference
+
+<architecture>
+$arch_contents
+</architecture>
+
+## Story Context
+
+<story>
+$story_contents
+</story>
+
+## Staged Changes
+
+Run: git diff --staged --name-only
+Then for each changed file: git diff --staged
+
+## Compliance Checklist
+
+### 1. Layer Violations
+- UI/Presentation only handles display logic
+- Business logic in service/domain layer
+- Data access confined to repository/data layer
+- Controllers only orchestrate
+
+### 2. Dependency Direction
+- No circular dependencies
+- Lower layers don't import from higher layers
+- Core doesn't depend on infrastructure
+
+### 3. Pattern Conformance
+- State management uses project's standard
+- Error handling follows conventions
+- API calls use established patterns
+
+### 4. Module Boundaries
+- Feature code in correct module
+- No cross-module imports bypassing interfaces
+
+### 5. File Organization
+- Files in correct directories
+- Naming follows conventions
+
+## Fix Policy
+
+| Severity | Action |
+|----------|--------|
+| HIGH | Fix immediately |
+| MEDIUM | Fix if possible, otherwise document |
+| LOW | Document only |
+
+## Completion Signals
+
+If compliant (no HIGH/MEDIUM violations or all fixed):
+Output: ARCH COMPLIANT: $story_id
+Or: ARCH COMPLIANT WITH FIXES: $story_id - Fixed N violations
+
+If HIGH violations cannot be fixed:
+First output:
+\`\`\`
+ARCH VIOLATIONS START
+- [HIGH] Description (file:line)
+- [MEDIUM] Description (file:line)
+ARCH VIOLATIONS END
+\`\`\`
+Then: ARCH VIOLATIONS: $story_id - [summary]
+
+## Begin Execution
+
+Check architecture compliance now. Stage any fixes with: git add -A"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] Would execute architecture compliance check for $story_id"
+        return 0
+    fi
+
+    local result
+    result=$(claude --dangerously-skip-permissions -p "$arch_prompt" 2>&1) || true
+
+    echo "$result" >> "$LOG_FILE"
+
+    if echo "$result" | grep -q "ARCH COMPLIANT"; then
+        log_success "Architecture compliant: $story_id"
+        return 0
+    elif echo "$result" | grep -q "ARCH VIOLATIONS"; then
+        log_error "Architecture violations found: $story_id"
+        echo "$result" | grep "ARCH VIOLATIONS"
+
+        # Extract violations for fix loop
+        LAST_ARCH_VIOLATIONS=$(echo "$result" | sed -n '/ARCH VIOLATIONS START/,/ARCH VIOLATIONS END/p' | grep -E '^\s*-\s*\[(HIGH|MEDIUM)\]' || true)
+
+        if [ -n "$LAST_ARCH_VIOLATIONS" ]; then
+            log "Captured architecture violations for fix loop"
+        fi
+
+        return 1
+    else
+        log_warn "Architecture check did not complete cleanly: $story_id"
+        return 0  # Don't block on unclear result
+    fi
+}
+
+execute_test_quality_phase() {
+    local story_file="$1"
+    local story_id=$(basename "$story_file" .md)
+
+    # Reset issues
+    LAST_TEST_QUALITY_ISSUES=""
+
+    log ">>> TEST QUALITY: $story_id (fresh context)"
+
+    local story_contents=$(cat "$story_file")
+
+    local quality_prompt="You are a Test Architect (TEA) executing a test quality review.
+
+## Your Task
+
+Review the tests created for story: $story_id
+
+Focus on test maintainability, determinism, isolation, and flakiness prevention.
+
+### CRITICAL AUTOMATION RULES
+- Do NOT pause for user confirmation
+- Execute the full quality review
+- Fix CRITICAL and HIGH issues automatically
+- Document MEDIUM and LOW issues
+
+## Story Context
+
+<story>
+$story_contents
+</story>
+
+## Test Files to Review
+
+Find test files from Dev Agent Record:
+\`\`\`bash
+git diff --staged --name-only | grep -E '\\.(spec|test)\\.(ts|js|tsx|jsx)\$'
+\`\`\`
+
+## Quality Criteria
+
+### 1. BDD Format (Given-When-Then)
+### 2. Test ID Conventions ({story_id}-E2E-001, etc.)
+### 3. Hard Waits Detection (no sleep(), waitForTimeout())
+### 4. Determinism (no conditionals, no random values)
+### 5. Isolation & Cleanup (afterEach hooks, no shared state)
+### 6. Explicit Assertions (every test has expect/assert)
+### 7. Test Length (≤300 lines)
+### 8. Fixture Patterns
+### 9. Data Factories (no hardcoded test data)
+### 10. Network-First Pattern (intercept before navigate)
+### 11. Flakiness Patterns
+
+## Quality Score
+
+Starting: 100
+- Critical violations: -10 each
+- High violations: -5 each
+- Medium violations: -2 each
+- Low violations: -1 each
+- Bonus for best practices: +5 each
+
+## Fix Policy
+
+| Severity | Action |
+|----------|--------|
+| CRITICAL | Must fix |
+| HIGH | Fix if total issues > 3 |
+| MEDIUM | Document |
+| LOW | Document |
+
+## Completion Signals
+
+If quality approved (score ≥70, no critical/high remaining):
+Output: TEST QUALITY APPROVED: $story_id - Score: N/100
+Or: TEST QUALITY APPROVED WITH FIXES: $story_id - Score: N/100, Fixed M issues
+
+If quality concerns (score 60-69):
+Output: TEST QUALITY CONCERNS: $story_id - Score: N/100
+
+If quality failed (score <60 or unfixable critical issues):
+First output:
+\`\`\`
+TEST QUALITY ISSUES START
+- [CRITICAL] Description (file:line)
+- [HIGH] Description (file:line)
+TEST QUALITY ISSUES END
+\`\`\`
+Then: TEST QUALITY FAILED: $story_id - Score: N/100
+
+## Begin Execution
+
+Review test quality now. Stage any fixes with: git add -A"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] Would execute test quality review for $story_id"
+        return 0
+    fi
+
+    local result
+    result=$(claude --dangerously-skip-permissions -p "$quality_prompt" 2>&1) || true
+
+    echo "$result" >> "$LOG_FILE"
+
+    if echo "$result" | grep -q "TEST QUALITY APPROVED"; then
+        log_success "Test quality approved: $story_id"
+        return 0
+    elif echo "$result" | grep -q "TEST QUALITY CONCERNS"; then
+        log_warn "Test quality concerns: $story_id"
+        return 0  # Concerns don't block
+    elif echo "$result" | grep -q "TEST QUALITY FAILED"; then
+        log_error "Test quality failed: $story_id"
+        echo "$result" | grep "TEST QUALITY FAILED"
+
+        # Extract issues for fix loop
+        LAST_TEST_QUALITY_ISSUES=$(echo "$result" | sed -n '/TEST QUALITY ISSUES START/,/TEST QUALITY ISSUES END/p' | grep -E '^\s*-\s*\[(CRITICAL|HIGH)\]' || true)
+
+        if [ -n "$LAST_TEST_QUALITY_ISSUES" ]; then
+            log "Captured test quality issues for fix loop"
+        fi
+
+        return 1
+    else
+        log_warn "Test quality check did not complete cleanly: $story_id"
+        return 0  # Don't block on unclear result
+    fi
+}
+
+execute_traceability_phase() {
+    log ">>> TRACEABILITY CHECK: Epic $EPIC_ID (fresh context)"
+
+    # Reset gaps
+    LAST_TRACEABILITY_GAPS=""
+
+    # Ensure output directory exists
+    mkdir -p "$TRACEABILITY_DIR"
+
+    local epic_contents=$(cat "$EPIC_FILE")
+
+    # Build story contents block
+    local all_stories=""
+    for story_file in "${STORIES[@]}"; do
+        local story_id=$(basename "$story_file" .md)
+        all_stories+="
+<story id=\"$story_id\">
+$(cat "$story_file")
+</story>
+"
+    done
+
+    local story_count=${#STORIES[@]}
+
+    local trace_prompt="You are a Test Architect (TEA) executing requirements traceability analysis.
+
+## Your Task
+
+Generate a traceability matrix for Epic: $EPIC_ID
+
+Map ALL acceptance criteria from ALL stories to their implementing tests.
+Identify coverage gaps and determine if the epic is ready for UAT.
+
+### CRITICAL AUTOMATION RULES
+- Do NOT pause for user confirmation
+- Execute the full traceability analysis
+- Generate the traceability matrix document
+- If gaps found, output them in structured format for auto-fix
+
+## Epic Definition
+
+<epic>
+$epic_contents
+</epic>
+
+## Completed Stories ($story_count total)
+
+$all_stories
+
+## Phase 1: Discover Tests
+
+\`\`\`bash
+find . -type f \\( -name \"*.spec.ts\" -o -name \"*.test.ts\" -o -name \"*.spec.js\" -o -name \"*.test.js\" \\) | head -100
+\`\`\`
+
+## Phase 2: Map Criteria to Tests
+
+For each acceptance criterion:
+- Search for test IDs, describe blocks
+- Classify: FULL, PARTIAL, NONE, UNIT-ONLY, INTEGRATION-ONLY
+
+## Coverage Thresholds
+
+| Priority | Required | Gate Impact |
+|----------|----------|-------------|
+| P0 | 100% | FAIL if not met |
+| P1 | ≥90% | CONCERNS if 80-89%, FAIL if <80% |
+| P2 | ≥80% | Advisory |
+| P3 | None | Advisory |
+
+## Phase 3: Gap Analysis
+
+Identify:
+- Critical gaps (P0 without coverage)
+- High priority gaps (P1 < 90%)
+- Medium priority gaps (P2 < 80%)
+
+## Phase 4: Generate Deliverables
+
+Save traceability matrix to: $TRACEABILITY_DIR/epic-${EPIC_ID}-traceability.md
+
+## Completion Signals
+
+If PASS (P0=100%, P1≥90%):
+Output: TRACEABILITY PASS: $EPIC_ID - P0: N%, P1: M%, Overall: O%
+
+If CONCERNS (P0=100%, P1 80-89%):
+Output: TRACEABILITY CONCERNS: $EPIC_ID - P1 at N% (below 90%)
+
+If FAIL (P0<100% or P1<80%):
+First output gaps for self-healing:
+\`\`\`
+TRACEABILITY GAPS START
+GAP: {story_id}|AC-{n}|{priority}|{description}|{recommended_test_id}|{test_level}
+SPEC:
+  Given: {precondition}
+  When: {action}
+  Then: {expected result}
+GAP: ...
+TRACEABILITY GAPS END
+\`\`\`
+Then: TRACEABILITY FAIL: $EPIC_ID - P0: N%, P1: M%, X critical gaps
+
+## Begin Execution
+
+Analyze traceability now."
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] Would execute traceability analysis for Epic $EPIC_ID"
+        return 0
+    fi
+
+    local result
+    result=$(claude --dangerously-skip-permissions -p "$trace_prompt" 2>&1) || true
+
+    echo "$result" >> "$LOG_FILE"
+
+    if echo "$result" | grep -q "TRACEABILITY PASS"; then
+        log_success "Traceability passed: Epic $EPIC_ID"
+        return 0
+    elif echo "$result" | grep -q "TRACEABILITY CONCERNS"; then
+        log_warn "Traceability concerns: Epic $EPIC_ID"
+        return 0  # Concerns don't block
+    elif echo "$result" | grep -q "TRACEABILITY FAIL"; then
+        log_error "Traceability failed: Epic $EPIC_ID"
+        echo "$result" | grep "TRACEABILITY FAIL"
+
+        # Extract gaps for self-healing
+        LAST_TRACEABILITY_GAPS=$(echo "$result" | sed -n '/TRACEABILITY GAPS START/,/TRACEABILITY GAPS END/p' || true)
+
+        if [ -n "$LAST_TRACEABILITY_GAPS" ]; then
+            log "Captured traceability gaps for self-healing"
+        fi
+
+        return 1
+    else
+        log_warn "Traceability check did not complete cleanly"
+        return 0  # Don't block on unclear result
+    fi
+}
+
+execute_traceability_fix_phase() {
+    local gaps="$1"
+    local attempt_num="$2"
+
+    log ">>> TRACEABILITY FIX: Epic $EPIC_ID (attempt $attempt_num, generating missing tests)"
+
+    local fix_prompt="You are a Test Architect generating tests to close coverage gaps.
+
+## Your Task
+
+Generate missing tests for Epic: $EPIC_ID (attempt $attempt_num of $MAX_TRACEABILITY_FIX_ATTEMPTS)
+
+### CRITICAL RULES
+- Generate ONLY the tests specified in the gaps
+- Follow existing test patterns in the codebase
+- Run each test to verify it passes
+- Stage changes: git add -A
+
+## Gaps to Address
+
+$gaps
+
+## Instructions
+
+For each GAP:
+1. Parse the specification (Given/When/Then)
+2. Create the test file if needed
+3. Implement the test following the spec
+4. Use existing patterns from codebase
+5. Run the test
+6. Stage changes
+
+## Completion Signals
+
+If all tests generated:
+Output: TEST GENERATION COMPLETE: Generated N tests
+
+If partial success:
+Output: TEST GENERATION PARTIAL: Generated N of M tests - [reason]
+
+## Begin Execution
+
+Generate missing tests now."
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] Would generate missing tests for Epic $EPIC_ID (attempt $attempt_num)"
+        return 0
+    fi
+
+    local result
+    result=$(claude --dangerously-skip-permissions -p "$fix_prompt" 2>&1) || true
+
+    echo "$result" >> "$LOG_FILE"
+
+    if echo "$result" | grep -q "TEST GENERATION COMPLETE"; then
+        log_success "Test generation complete for Epic $EPIC_ID"
+        return 0
+    elif echo "$result" | grep -q "TEST GENERATION PARTIAL"; then
+        log_warn "Partial test generation for Epic $EPIC_ID"
+        return 1
+    else
+        log_error "Test generation did not complete cleanly"
+        return 1
+    fi
+}
 
 execute_story_with_fix_loop() {
     local story_file="$1"
     local story_id=$(basename "$story_file" .md)
     local fix_attempt=0
+    local arch_fix_attempt=0
+    local test_quality_fix_attempt=0
     local needs_fixes=false
 
     # DEV PHASE (Context 1)
@@ -1014,13 +1540,43 @@ execute_story_with_fix_loop() {
         return 1
     fi
 
+    # ARCHITECTURE COMPLIANCE CHECK (Context 2) - Per Story
+    if [ "$SKIP_ARCH" = false ]; then
+        while true; do
+            if execute_arch_compliance_phase "$story_file"; then
+                log_success "Architecture compliant: $story_id"
+                break
+            fi
+
+            # Check if we have violations to fix
+            if [ -z "$LAST_ARCH_VIOLATIONS" ]; then
+                log_warn "Arch check unclear, proceeding anyway"
+                break
+            fi
+
+            ((arch_fix_attempt++))
+            if [ $arch_fix_attempt -gt $MAX_ARCH_FIX_ATTEMPTS ]; then
+                log_error "Max arch fix attempts ($MAX_ARCH_FIX_ATTEMPTS) reached for $story_id"
+                add_metrics_issue "$story_id" "arch_violations" "Architecture violations after $MAX_ARCH_FIX_ATTEMPTS attempts"
+                # Don't fail the story, proceed with violations documented
+                break
+            fi
+
+            log_warn "Arch violations found, attempting fix $arch_fix_attempt of $MAX_ARCH_FIX_ATTEMPTS"
+            # Use the regular fix phase with arch context
+            if ! execute_fix_phase "$story_file" "$LAST_ARCH_VIOLATIONS" "$arch_fix_attempt"; then
+                log_warn "Arch fix incomplete, continuing..."
+            fi
+        done
+    fi
+
     # REVIEW + FIX LOOP
     while true; do
         # REVIEW PHASE (Fresh Context)
         if execute_review_phase "$story_file"; then
-            # Review passed - we're done
+            # Review passed - proceed to test quality
             log_success "Story passed review: $story_id"
-            return 0
+            break
         fi
 
         # Review failed - check if we have findings to fix
@@ -1055,6 +1611,38 @@ execute_story_with_fix_loop() {
         # Loop back to review phase to verify fixes
         log "Re-running review after fix attempt $fix_attempt..."
     done
+
+    # TEST QUALITY REVIEW (Fresh Context) - Per Story
+    if [ "$SKIP_TEST_QUALITY" = false ]; then
+        while true; do
+            if execute_test_quality_phase "$story_file"; then
+                log_success "Test quality approved: $story_id"
+                break
+            fi
+
+            # Check if we have issues to fix
+            if [ -z "$LAST_TEST_QUALITY_ISSUES" ]; then
+                log_warn "Test quality check unclear, proceeding anyway"
+                break
+            fi
+
+            ((test_quality_fix_attempt++))
+            if [ $test_quality_fix_attempt -gt $MAX_TEST_QUALITY_FIX_ATTEMPTS ]; then
+                log_warn "Max test quality fix attempts ($MAX_TEST_QUALITY_FIX_ATTEMPTS) reached for $story_id"
+                add_metrics_issue "$story_id" "test_quality_concerns" "Test quality issues after $MAX_TEST_QUALITY_FIX_ATTEMPTS attempts"
+                # Don't fail the story, proceed with concerns documented
+                break
+            fi
+
+            log_warn "Test quality issues found, attempting fix $test_quality_fix_attempt of $MAX_TEST_QUALITY_FIX_ATTEMPTS"
+            # Use the regular fix phase with test quality context
+            if ! execute_fix_phase "$story_file" "$LAST_TEST_QUALITY_ISSUES" "$test_quality_fix_attempt"; then
+                log_warn "Test quality fix incomplete, continuing..."
+            fi
+        done
+    fi
+
+    return 0
 }
 
 commit_story() {
@@ -1283,7 +1871,53 @@ for story_file in "${STORIES[@]}"; do
 done
 
 # =============================================================================
-# UAT Generation (Context 3 - Fresh)
+# Traceability Check (Per-Epic, with Self-Healing)
+# =============================================================================
+
+if [ "$SKIP_TRACEABILITY" = false ]; then
+    echo ""
+    log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log "Requirements Traceability Check"
+    log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    trace_fix_attempt=0
+    while true; do
+        if execute_traceability_phase; then
+            log_success "Traceability check passed for Epic $EPIC_ID"
+            break
+        fi
+
+        # Check if we have gaps to fix
+        if [ -z "$LAST_TRACEABILITY_GAPS" ]; then
+            log_warn "Traceability check unclear, proceeding to UAT"
+            break
+        fi
+
+        ((trace_fix_attempt++))
+        if [ $trace_fix_attempt -gt $MAX_TRACEABILITY_FIX_ATTEMPTS ]; then
+            log_warn "Max traceability fix attempts ($MAX_TRACEABILITY_FIX_ATTEMPTS) reached"
+            add_metrics_issue "epic-$EPIC_ID" "traceability_gaps" "Coverage gaps remain after $MAX_TRACEABILITY_FIX_ATTEMPTS attempts"
+            # Don't fail the epic, proceed with gaps documented
+            break
+        fi
+
+        log_warn "Traceability gaps found, generating missing tests (attempt $trace_fix_attempt of $MAX_TRACEABILITY_FIX_ATTEMPTS)"
+        if ! execute_traceability_fix_phase "$LAST_TRACEABILITY_GAPS" "$trace_fix_attempt"; then
+            log_warn "Test generation incomplete, continuing..."
+        fi
+
+        # Commit any generated tests
+        if [ "$NO_COMMIT" = false ] && [ "$DRY_RUN" = false ]; then
+            git add -A
+            git commit -m "test(epic-$EPIC_ID): generate missing tests for traceability (attempt $trace_fix_attempt)" 2>/dev/null || true
+        fi
+
+        log "Re-running traceability check..."
+    done
+fi
+
+# =============================================================================
+# UAT Generation (Fresh Context)
 # =============================================================================
 
 echo ""
@@ -1316,10 +1950,11 @@ echo "  Completed:  $COMPLETED"
 echo "  Failed:     $FAILED"
 echo ""
 echo "  Deliverables:"
-echo "    - Stories:  $STORIES_DIR/"
-echo "    - UAT:      $UAT_DIR/epic-${EPIC_ID}-uat.md"
-echo "    - Metrics:  $METRICS_FILE"
-echo "    - Log:      $LOG_FILE"
+echo "    - Stories:       $STORIES_DIR/"
+echo "    - UAT:           $UAT_DIR/epic-${EPIC_ID}-uat.md"
+echo "    - Traceability:  $TRACEABILITY_DIR/epic-${EPIC_ID}-traceability.md"
+echo "    - Metrics:       $METRICS_FILE"
+echo "    - Log:           $LOG_FILE"
 echo ""
 
 if [ $FAILED -gt 0 ]; then
