@@ -1819,9 +1819,9 @@ for story_file in "${STORIES[@]}"; do
         fi
     fi
 
-    # --skip-done: Skip stories with Status: Done
+    # --skip-done: Skip stories with Status: done (case-insensitive)
     if [ "$SKIP_DONE" = true ]; then
-        if grep -q "^Status:.*Done" "$story_file" 2>/dev/null; then
+        if grep -qi "^Status:.*done" "$story_file" 2>/dev/null; then
             log_warn "Skipping $story_id (Status: Done)"
             ((SKIPPED++))
             update_story_metrics "skipped"
