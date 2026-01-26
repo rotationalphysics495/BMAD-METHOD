@@ -657,7 +657,9 @@ check_branch_protection
 
 Nice-to-have improvements for better UX and maintainability.
 
-### L1. No Progress Persistence / Resume Capability
+### L1. No Progress Persistence / Resume Capability ✅ DONE
+
+> **Implemented in `scripts/epic-execute-lib/utils.sh`** - Added `load_checkpoint()`, `save_checkpoint()`, `clear_checkpoint()`, and `get_resume_index()` functions. Added `--resume` flag to epic-execute.sh. Checkpoint includes story index, completed/failed/skipped counts, and timestamp. Old checkpoints (>7 days) are automatically ignored.
 
 **Problem:** If script fails at story 5/10, user must use `--start-from` manually. No automatic resume.
 
@@ -700,7 +702,9 @@ load_checkpoint() {
 
 ---
 
-### L2. Missing --help Option
+### L2. Missing --help Option ✅ DONE
+
+> **Implemented in `scripts/epic-execute.sh`** - Added `show_help()` function with comprehensive documentation of all options, examples, and environment variables. Added `-h` and `--help` flag handling at start of argument parsing.
 
 **Problem:** No built-in help. Users must read script header comments.
 
@@ -768,7 +772,9 @@ EOF
 
 ---
 
-### L3. No Verbose Logging Option for Claude Output
+### L3. No Verbose Logging Option for Claude Output ✅ DONE
+
+> **Implemented in `scripts/epic-execute-lib/utils.sh`** - Added `execute_claude_verbose()` function that streams Claude output to both terminal and log file when `--verbose` is set. Includes timeout handling and prompt size logging.
 
 **Problem:** Claude output only goes to log file. Debugging requires reading `/tmp/bmad-epic-execute-$$.log`.
 
@@ -794,7 +800,9 @@ execute_claude_prompt() {
 
 ---
 
-### L4. Metrics File Can Grow Unbounded
+### L4. Metrics File Can Grow Unbounded ✅ DONE
+
+> **Implemented in `scripts/epic-execute.sh`** - Updated `init_metrics()` to archive existing metrics files before creating new ones. Archives stored in `metrics/archive/` directory. Automatically cleans up old archives, keeping only the last 10 per epic.
 
 **Problem:** YAML metrics with arrays (issues, story_details) grow indefinitely across multiple runs.
 
@@ -819,7 +827,9 @@ init_metrics() {
 
 ---
 
-### L5. No Validation of Workflow Files Content
+### L5. No Validation of Workflow Files Content ✅ DONE
+
+> **Implemented in `scripts/epic-execute-lib/utils.sh`** - Added `validate_yaml_content()`, `validate_xml_content()`, and `validate_workflow_content()` functions. Uses yq for YAML validation (with fallback basic syntax checks) and xmllint for XML validation. Updated `validate_workflows()` in epic-execute.sh to call content validation.
 
 **Problem:** Script checks if workflow files exist but not if they're valid YAML/XML.
 
@@ -1210,11 +1220,15 @@ Output: TEST QUALITY FAILED: $story_id - Score: N/100"
 | M4 | Cross-platform sed | Low | ✅ Done |
 | M5 | Branch Protection | Low | ✅ Done |
 
-### Phase 5: Low Priority (As Time Permits)
+### Phase 5: Low Priority ✅ COMPLETE
 
-| ID | Improvement | Effort |
-|----|-------------|--------|
-| L1-L5 | UX Improvements | Low-Medium |
+| ID | Improvement | Effort | Status |
+|----|-------------|--------|--------|
+| L1 | Progress Persistence / Resume | Medium | ✅ Done |
+| L2 | --help Option | Low | ✅ Done |
+| L3 | Verbose Claude Output | Low | ✅ Done |
+| L4 | Metrics File Archival | Low | ✅ Done |
+| L5 | Workflow Content Validation | Medium | ✅ Done |
 
 ---
 
@@ -1225,11 +1239,11 @@ The epic-execute library has a solid architecture with multi-phase validation an
 ### Completed
 - ✅ **High-Priority Issues (5)** - All fixed (H1-H5) in commit `ce2f9fb3`
 - ✅ **Medium-Priority Issues (5)** - All fixed (M1-M5) via new `utils.sh` module
+- ✅ **Low-Priority Issues (5)** - All fixed (L1-L5) for better UX
 
 ### Remaining
 - ⏳ **Critical Issues (5)** - Must be fixed to ensure basic reliability
 - ⏳ **BMAD Integration Gaps (4)** - Custom prompts should leverage existing workflows for consistency
-- ⏳ **Low-Priority Issues (5)** - UX improvements for better usability
 
 ### Implementation Summary
 
@@ -1239,9 +1253,12 @@ The epic-execute library has a solid architecture with multi-phase validation an
 - M3: `check_phase_completion_fuzzy()` - Case-insensitive pattern matching
 - M4: `sed_inplace()` / `sed_inplace_backup()` - Cross-platform sed
 - M5: `check_branch_protection()` - Prevents commits to main/master
+- L1: `load_checkpoint()` / `save_checkpoint()` / `clear_checkpoint()` - Resume capability
+- L3: `execute_claude_verbose()` - Verbose Claude output streaming
+- L5: `validate_yaml_content()` / `validate_xml_content()` / `validate_workflow_content()` - Content validation
 
 **Updated Files:**
-- `scripts/epic-execute.sh` - Sources utils.sh, uses cross-platform sed, branch protection on startup
+- `scripts/epic-execute.sh` - Sources utils.sh, uses cross-platform sed, branch protection on startup, --help option, --resume flag, metrics archival, workflow content validation
 - `scripts/epic-execute-lib/json-output.sh` - Enhanced JSON extraction, fuzzy matching fallback
 
-The epic-execute script is now more reliable with better error handling, cross-platform support, and safety checks.
+The epic-execute script is now more reliable with better error handling, cross-platform support, safety checks, and improved UX.

@@ -378,6 +378,24 @@ init_metrics() {
     METRICS_FILE="$METRICS_DIR/epic-${EPIC_ID}-metrics.yaml"
     mkdir -p "$METRICS_DIR"
 
+    # L4: Archive existing metrics file to prevent unbounded growth
+    if [ -f "$METRICS_FILE" ]; then
+        local archive_name="epic-${EPIC_ID}-metrics.$(date +%Y%m%d%H%M%S).yaml"
+        local archive_dir="$METRICS_DIR/archive"
+        mkdir -p "$archive_dir"
+        mv "$METRICS_FILE" "$archive_dir/$archive_name"
+        log "Archived previous metrics to: archive/$archive_name"
+
+        # Clean up old archives (keep last 10)
+        local archive_count
+        archive_count=$(find "$archive_dir" -name "epic-${EPIC_ID}-metrics.*.yaml" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$archive_count" -gt 10 ]; then
+            log "Cleaning up old metrics archives (keeping last 10)..."
+            find "$archive_dir" -name "epic-${EPIC_ID}-metrics.*.yaml" -type f | \
+                sort | head -n -10 | xargs rm -f 2>/dev/null || true
+        fi
+    fi
+
     local start_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
     cat > "$METRICS_FILE" << EOF
@@ -631,6 +649,90 @@ mark_story_done() {
 }
 
 # =============================================================================
+# Help Function
+# =============================================================================
+
+show_help() {
+    cat << 'EOF'
+BMAD Epic Execute - Automated Story Execution with Context Isolation
+
+USAGE:
+    epic-execute.sh <epic-id> [OPTIONS]
+
+ARGUMENTS:
+    epic-id             Numeric ID of the epic to execute (e.g., 1, 42)
+
+OPTIONS:
+    Execution Control:
+      --dry-run             Show what would be executed without running
+      --start-from ID       Start from a specific story (e.g., 31-2)
+      --resume              Resume from last checkpoint (auto-detected)
+      --parallel            Run independent stories in parallel (experimental)
+      --verbose             Show detailed output including Claude responses
+      --legacy-output       Use legacy text-based output parsing (no JSON)
+
+    Gate Skipping:
+      --skip-review         Skip code review phase (not recommended)
+      --skip-arch           Skip architecture compliance check
+      --skip-test-quality   Skip test quality review
+      --skip-traceability   Skip traceability check (not recommended)
+      --skip-static-analysis  Skip static analysis gate
+      --skip-regression     Skip regression test gate
+
+    TDD/Testing Options:
+      --skip-design         Skip pre-implementation design phase
+      --skip-tdd            Skip all test-first development phases
+      --skip-test-spec      Skip test specification phase only
+      --skip-test-impl      Skip test implementation phase only
+
+    Commit Control:
+      --no-commit           Stage changes but don't commit
+      --skip-done           Skip stories with Status: Done
+
+    Help:
+      -h, --help            Show this help message
+
+EXAMPLES:
+    # Execute epic 1 with all quality gates
+    ./epic-execute.sh 1
+
+    # Dry run to preview what will be executed
+    ./epic-execute.sh 1 --dry-run --verbose
+
+    # Resume from last checkpoint (after interruption)
+    ./epic-execute.sh 1 --resume
+
+    # Start from a specific story
+    ./epic-execute.sh 1 --start-from 1-3
+
+    # Skip already-completed stories
+    ./epic-execute.sh 1 --skip-done
+
+    # Fast mode (skip optional quality gates)
+    ./epic-execute.sh 1 --skip-arch --skip-traceability
+
+    # Development mode (no commits, verbose output)
+    ./epic-execute.sh 1 --no-commit --verbose
+
+ENVIRONMENT VARIABLES:
+    CLAUDE_TIMEOUT          Timeout for Claude invocations (default: 600s)
+    PROJECT_ROOT            Override project root detection
+    PROTECTED_BRANCHES      Space-separated list of protected branches (default: "main master")
+    MAX_PROMPT_SIZE         Maximum prompt size in bytes (default: 150000)
+    RETRY_MAX_ATTEMPTS      Max retry attempts for transient failures (default: 3)
+    RETRY_INITIAL_DELAY     Initial retry delay in seconds (default: 5)
+
+FILES:
+    Logs:       /tmp/bmad-epic-execute-$$.log
+    Metrics:    docs/sprint-artifacts/metrics/epic-<id>-metrics.yaml
+    Checkpoint: docs/sprint-artifacts/.epic-<id>-checkpoint
+
+For more information, see: docs/bmad_improvements_v2_fixes.md
+EOF
+    exit 0
+}
+
+# =============================================================================
 # Argument Parsing
 # =============================================================================
 
@@ -641,6 +743,7 @@ NO_COMMIT=false
 PARALLEL=false
 VERBOSE=false
 START_FROM=""
+RESUME_FROM_CHECKPOINT=false
 SKIP_DONE=false
 SKIP_ARCH=false
 SKIP_TEST_QUALITY=false
@@ -653,8 +756,16 @@ SKIP_TEST_SPEC=false
 SKIP_TEST_IMPL=false
 LEGACY_OUTPUT=false
 
+# Check for help flag before processing other arguments
+if [[ "${1:-}" =~ ^(-h|--help)$ ]]; then
+    show_help
+fi
+
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help)
+            show_help
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
@@ -678,6 +789,10 @@ while [[ $# -gt 0 ]]; do
         --start-from)
             START_FROM="$2"
             shift 2
+            ;;
+        --resume)
+            RESUME_FROM_CHECKPOINT=true
+            shift
             ;;
         --skip-done)
             SKIP_DONE=true
@@ -771,6 +886,7 @@ log "Project root: $PROJECT_ROOT"
 
 validate_workflows() {
     local missing=0
+    local invalid=0
 
     log "Validating BMAD workflow files..."
 
@@ -778,26 +894,61 @@ validate_workflows() {
     if [ ! -f "$WORKFLOW_EXECUTOR" ]; then
         log_error "Missing: Core workflow executor at $WORKFLOW_EXECUTOR"
         ((missing++))
+    else
+        # L5: Validate XML content
+        if type validate_workflow_content >/dev/null 2>&1; then
+            if ! validate_workflow_content "$WORKFLOW_EXECUTOR"; then
+                ((invalid++))
+            fi
+        fi
     fi
 
     # Dev-story workflow
     if [ ! -f "$DEV_WORKFLOW_YAML" ]; then
         log_error "Missing: Dev workflow.yaml at $DEV_WORKFLOW_YAML"
         ((missing++))
+    else
+        # L5: Validate YAML content
+        if type validate_workflow_content >/dev/null 2>&1; then
+            if ! validate_workflow_content "$DEV_WORKFLOW_YAML"; then
+                ((invalid++))
+            fi
+        fi
     fi
     if [ ! -f "$DEV_WORKFLOW_INSTRUCTIONS" ]; then
         log_error "Missing: Dev instructions.xml at $DEV_WORKFLOW_INSTRUCTIONS"
         ((missing++))
+    else
+        # L5: Validate XML content
+        if type validate_workflow_content >/dev/null 2>&1; then
+            if ! validate_workflow_content "$DEV_WORKFLOW_INSTRUCTIONS"; then
+                ((invalid++))
+            fi
+        fi
     fi
 
     # Code-review workflow
     if [ ! -f "$REVIEW_WORKFLOW_YAML" ]; then
         log_error "Missing: Review workflow.yaml at $REVIEW_WORKFLOW_YAML"
         ((missing++))
+    else
+        # L5: Validate YAML content
+        if type validate_workflow_content >/dev/null 2>&1; then
+            if ! validate_workflow_content "$REVIEW_WORKFLOW_YAML"; then
+                ((invalid++))
+            fi
+        fi
     fi
     if [ ! -f "$REVIEW_WORKFLOW_INSTRUCTIONS" ]; then
         log_error "Missing: Review instructions.xml at $REVIEW_WORKFLOW_INSTRUCTIONS"
         ((missing++))
+    else
+        # L5: Validate XML content
+        if type validate_workflow_content >/dev/null 2>&1; then
+            if ! validate_workflow_content "$REVIEW_WORKFLOW_INSTRUCTIONS"; then
+                ((invalid++))
+            fi
+        fi
     fi
 
     if [ $missing -gt 0 ]; then
@@ -805,6 +956,10 @@ validate_workflows() {
         log_error "Ensure you are running from the BMAD-METHOD repository"
         log_error "Workflows expected at: $WORKFLOWS_DIR"
         exit 1
+    fi
+
+    if [ $invalid -gt 0 ]; then
+        log_warn "$invalid workflow files have content issues (may still work)"
     fi
 
     log_success "All BMAD workflow files validated"
@@ -838,6 +993,24 @@ mkdir -p "$SPRINTS_DIR"
 EPIC_START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EPIC_START_SECONDS=$(date +%s)
 init_metrics
+
+# L1: Load checkpoint for resume capability
+RESUME_START_INDEX=0
+if [ "$RESUME_FROM_CHECKPOINT" = true ] && type load_checkpoint >/dev/null 2>&1; then
+    if load_checkpoint "$EPIC_ID" "$SPRINT_ARTIFACTS_DIR"; then
+        RESUME_START_INDEX=$(get_resume_index)
+        # Restore counters from checkpoint
+        COMPLETED="${CHECKPOINT_COMPLETED:-0}"
+        FAILED="${CHECKPOINT_FAILED:-0}"
+        SKIPPED="${CHECKPOINT_SKIPPED:-0}"
+        log "Will resume from story index: $RESUME_START_INDEX"
+    else
+        log "No checkpoint found - starting from beginning"
+    fi
+elif [ -n "$START_FROM" ]; then
+    # Manual --start-from takes precedence
+    log "Using --start-from: $START_FROM"
+fi
 
 # Initialize decision log (if module loaded)
 if type init_decision_log >/dev/null 2>&1; then
@@ -2732,14 +2905,32 @@ log "=========================================="
 log "Starting execution of ${#STORIES[@]} stories"
 log "=========================================="
 
-COMPLETED=0
-FAILED=0
-SKIPPED=0
+# Initialize counters (may be restored from checkpoint)
+if [ -z "$COMPLETED" ] || [ "$COMPLETED" = "0" ]; then
+    COMPLETED=0
+fi
+if [ -z "$FAILED" ] || [ "$FAILED" = "0" ]; then
+    FAILED=0
+fi
+if [ -z "$SKIPPED" ] || [ "$SKIPPED" = "0" ]; then
+    SKIPPED=0
+fi
 START_TIME=$(date +%s)
 STARTED=false
 
+# Track current story index for checkpoint/resume
+STORY_INDEX=0
+
 for story_file in "${STORIES[@]}"; do
     story_id=$(basename "$story_file" .md)
+
+    # L1: Resume capability - skip stories before resume index
+    if [ "$RESUME_START_INDEX" -gt 0 ] && [ "$STORY_INDEX" -lt "$RESUME_START_INDEX" ]; then
+        log_warn "Skipping $story_id (resuming from index $RESUME_START_INDEX)"
+        ((STORY_INDEX++))
+        CURRENT_STORY_INDEX=$STORY_INDEX
+        continue
+    fi
 
     # --start-from: Skip stories until we reach the specified one
     if [ -n "$START_FROM" ] && [ "$STARTED" = false ]; then
@@ -2748,7 +2939,8 @@ for story_file in "${STORIES[@]}"; do
         else
             log_warn "Skipping $story_id (waiting for $START_FROM)"
             ((SKIPPED++))
-            ((CURRENT_STORY_INDEX++))
+            ((STORY_INDEX++))
+            CURRENT_STORY_INDEX=$STORY_INDEX
             update_story_metrics "skipped"
             continue
         fi
@@ -2759,7 +2951,8 @@ for story_file in "${STORIES[@]}"; do
         if grep -qi "^Status:.*done" "$story_file" 2>/dev/null; then
             log_warn "Skipping $story_id (Status: Done)"
             ((SKIPPED++))
-            ((CURRENT_STORY_INDEX++))
+            ((STORY_INDEX++))
+            CURRENT_STORY_INDEX=$STORY_INDEX
             update_story_metrics "skipped"
             continue
         fi
@@ -2776,8 +2969,13 @@ for story_file in "${STORIES[@]}"; do
         if ! execute_story_with_fix_loop "$story_file"; then
             log_error "Story execution failed for $story_id"
             ((FAILED++))
-            ((CURRENT_STORY_INDEX++))
+            ((STORY_INDEX++))
+            CURRENT_STORY_INDEX=$STORY_INDEX
             update_story_metrics "failed"
+            # Save checkpoint on failure too
+            if type save_checkpoint >/dev/null 2>&1; then
+                save_checkpoint "$STORY_INDEX" "$story_id" "$COMPLETED" "$FAILED" "$SKIPPED"
+            fi
             continue
         fi
     else
@@ -2785,9 +2983,14 @@ for story_file in "${STORIES[@]}"; do
         if ! execute_dev_phase "$story_file"; then
             log_error "Dev phase failed for $story_id"
             ((FAILED++))
-            ((CURRENT_STORY_INDEX++))
+            ((STORY_INDEX++))
+            CURRENT_STORY_INDEX=$STORY_INDEX
             update_story_metrics "failed"
             add_metrics_issue "$story_id" "dev_phase_failed" "Development phase did not complete"
+            # Save checkpoint on failure too
+            if type save_checkpoint >/dev/null 2>&1; then
+                save_checkpoint "$STORY_INDEX" "$story_id" "$COMPLETED" "$FAILED" "$SKIPPED"
+            fi
             continue
         fi
     fi
@@ -2808,7 +3011,13 @@ for story_file in "${STORIES[@]}"; do
     log_success "Story complete: $story_id ($COMPLETED/${#STORIES[@]})"
 
     # Track progress for checkpoint/resume
-    ((CURRENT_STORY_INDEX++))
+    ((STORY_INDEX++))
+    CURRENT_STORY_INDEX=$STORY_INDEX
+
+    # L1: Save checkpoint after each completed story
+    if type save_checkpoint >/dev/null 2>&1; then
+        save_checkpoint "$STORY_INDEX" "$story_id" "$COMPLETED" "$FAILED" "$SKIPPED"
+    fi
 done
 
 # =============================================================================
@@ -2901,7 +3110,13 @@ echo ""
 
 if [ $FAILED -gt 0 ]; then
     log_warn "$FAILED stories failed - check log for details"
+    log "Checkpoint preserved for resume capability"
     exit 1
+fi
+
+# L1: Clear checkpoint on successful completion
+if type clear_checkpoint >/dev/null 2>&1; then
+    clear_checkpoint
 fi
 
 log_success "All stories completed successfully"
