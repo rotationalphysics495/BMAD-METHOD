@@ -405,11 +405,11 @@ Respect these decisions unless you have a specific reason to deviate.
 
 ---
 
-### 6. Test-First Enforcement (HIGH IMPACT, HIGH EFFORT)
+### 6. Test-First Enforcement (HIGH IMPACT, HIGH EFFORT) ✅ IMPLEMENTED
 
 Restructure the flow to enforce TDD principles.
 
-**Proposed New Flow:**
+**Implemented Flow:**
 
 ```
 1. DESIGN PHASE (Dev)       → Plan implementation approach
@@ -424,14 +424,29 @@ Restructure the flow to enforce TDD principles.
 
 This ensures tests actually test requirements rather than implementation details.
 
+**Implementation:** Module at `scripts/epic-execute-lib/tdd-flow.sh` with functions:
+- `execute_test_spec_phase()` - Generates BDD test specifications from acceptance criteria
+- `execute_test_impl_phase()` - Creates failing tests from specifications
+- `execute_test_verification_phase()` - Verifies tests fail correctly before implementation
+- `build_test_spec_context_for_dev()` - Provides test context to dev phase
+
+**Skip flags:** `--skip-tdd`, `--skip-test-spec`, `--skip-test-impl`
+
 ---
 
-### 7. Structured Output Validation (MEDIUM IMPACT, MEDIUM EFFORT)
+### 7. Structured Output Validation (MEDIUM IMPACT, MEDIUM EFFORT) ✅ IMPLEMENTED
 
 Replace fragile regex parsing with structured JSON output.
 
+**Implementation:** Module at `scripts/epic-execute-lib/json-output.sh` with functions:
+- `extract_json_result()` - Parse JSON from Claude output
+- `get_result_status()` - Extract status field
+- `get_result_files()` - Extract files_changed array
+- `get_result_issues()` - Extract issues for fix loops
+- `check_phase_completion()` - Unified completion detection with JSON + text fallback
+
 ```bash
-# Add to prompts:
+# Prompts now request JSON output:
 "Output your result as JSON:
 \`\`\`json
 {
@@ -445,10 +460,12 @@ Replace fragile regex parsing with structured JSON output.
 }
 \`\`\`"
 
-# Parse with jq:
-result_json=$(echo "$result" | sed -n '/```json/,/```/p' | sed '1d;$d')
-status=$(echo "$result_json" | jq -r '.status')
+# Parsing with fallback:
+check_phase_completion "$result" "dev" "$story_id"
+# Returns: 0 (complete), 1 (failed), 2 (unclear)
 ```
+
+**Skip flag:** `--legacy-output` (disables JSON parsing, uses text-only detection)
 
 ---
 
@@ -461,8 +478,8 @@ status=$(echo "$result_json" | jq -r '.status')
 | 3 | Decision Log | MEDIUM | LOW | ✅ DONE | Easy context preservation |
 | 4 | Regression Gate | HIGH | MEDIUM | ✅ DONE | Prevents silent breakage |
 | 5 | Design Phase | HIGH | MEDIUM | ✅ DONE | Catches issues early |
-| 6 | Structured JSON Output | MEDIUM | MEDIUM | | Improves reliability |
-| 7 | Test-First Flow | HIGH | HIGH | | Fundamental quality improvement |
+| 6 | Structured JSON Output | MEDIUM | MEDIUM | ✅ DONE | Improves reliability |
+| 7 | Test-First Flow | HIGH | HIGH | ✅ DONE | Fundamental quality improvement |
 
 ---
 
@@ -532,8 +549,16 @@ These three changes alone would dramatically improve code reliability with minim
 **Additionally implemented:**
 4. **Regression Gate** - Prevents silent breakage ✅
 5. **Design Phase** - Catches architectural issues early ✅
+6. **Structured JSON Output** - Reliable completion signal parsing ✅
+7. **Test-First Flow** - TDD workflow with test specs before implementation ✅
 
-**Implementation:** All features are modularized in `scripts/epic-execute-lib/` with graceful degradation and skip flags (`--skip-design`, `--skip-regression`).
+**Implementation:** All features are modularized in `scripts/epic-execute-lib/` with graceful degradation and skip flags:
+- `--skip-design` - Skip pre-implementation design phase
+- `--skip-regression` - Skip regression test gate
+- `--skip-tdd` - Skip test-first development phases
+- `--skip-test-spec` - Skip test specification phase only
+- `--skip-test-impl` - Skip test implementation phase only
+- `--legacy-output` - Use legacy text-based output parsing (no JSON)
 
 ---
 

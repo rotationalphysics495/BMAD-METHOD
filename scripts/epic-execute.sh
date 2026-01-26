@@ -36,6 +36,8 @@ LIB_DIR="$SCRIPT_DIR/epic-execute-lib"
 [ -f "$LIB_DIR/decision-log.sh" ] && source "$LIB_DIR/decision-log.sh"
 [ -f "$LIB_DIR/regression-gate.sh" ] && source "$LIB_DIR/regression-gate.sh"
 [ -f "$LIB_DIR/design-phase.sh" ] && source "$LIB_DIR/design-phase.sh"
+[ -f "$LIB_DIR/json-output.sh" ] && source "$LIB_DIR/json-output.sh"
+[ -f "$LIB_DIR/tdd-flow.sh" ] && source "$LIB_DIR/tdd-flow.sh"
 
 STORIES_DIR="$PROJECT_ROOT/docs/stories"
 SPRINT_ARTIFACTS_DIR="$PROJECT_ROOT/docs/sprint-artifacts"
@@ -382,6 +384,10 @@ SKIP_TRACEABILITY=false
 SKIP_STATIC_ANALYSIS=false
 SKIP_DESIGN=false
 SKIP_REGRESSION=false
+SKIP_TDD=false
+SKIP_TEST_SPEC=false
+SKIP_TEST_IMPL=false
+LEGACY_OUTPUT=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -437,6 +443,22 @@ while [[ $# -gt 0 ]]; do
             SKIP_REGRESSION=true
             shift
             ;;
+        --skip-tdd)
+            SKIP_TDD=true
+            shift
+            ;;
+        --skip-test-spec)
+            SKIP_TEST_SPEC=true
+            shift
+            ;;
+        --skip-test-impl)
+            SKIP_TEST_IMPL=true
+            shift
+            ;;
+        --legacy-output)
+            LEGACY_OUTPUT=true
+            shift
+            ;;
         -*)
             echo "Unknown option: $1"
             exit 1
@@ -465,6 +487,10 @@ if [ -z "$EPIC_ID" ]; then
     echo "  --skip-static-analysis  Skip static analysis gate (runs real tooling)"
     echo "  --skip-design     Skip pre-implementation design phase"
     echo "  --skip-regression Skip regression test gate"
+    echo "  --skip-tdd        Skip test-first development phases"
+    echo "  --skip-test-spec  Skip test specification phase only"
+    echo "  --skip-test-impl  Skip test implementation phase only"
+    echo "  --legacy-output   Use legacy text-based output parsing (no JSON)"
     exit 1
 fi
 
@@ -545,6 +571,12 @@ fi
 # Initialize regression baseline (if module loaded and not skipped)
 if [ "$SKIP_REGRESSION" = false ] && type init_regression_baseline >/dev/null 2>&1; then
     init_regression_baseline
+fi
+
+# Set legacy output mode if requested
+if [ "$LEGACY_OUTPUT" = true ] && type -v USE_LEGACY_OUTPUT >/dev/null 2>&1; then
+    USE_LEGACY_OUTPUT=true
+    log "Using legacy text-based output parsing"
 fi
 
 # Find epic file (supports both epic-39-*.md and epic-039-*.md formats)
@@ -673,6 +705,12 @@ execute_dev_phase() {
         design_context=$(build_design_context_for_dev "$story_id")
     fi
 
+    # Get test spec context if available (from TDD test spec phase)
+    local test_spec_context=""
+    if type build_test_spec_context_for_dev >/dev/null 2>&1; then
+        test_spec_context=$(build_test_spec_context_for_dev "$story_id")
+    fi
+
     # Build the dev prompt using BMAD workflow
     local dev_prompt="You are executing a BMAD dev-story workflow in automated mode.
 
@@ -721,6 +759,7 @@ $workflow_checklist
 $story_contents
 </story-contents>
 $design_context
+$test_spec_context
 ## Previous Implementation Context
 
 <decision-log>
@@ -743,10 +782,25 @@ $decision_context
 ## Completion Signals
 
 When the workflow completes successfully (all tasks done, tests pass, status set to 'review'):
-Output exactly: IMPLEMENTATION COMPLETE: $story_id
+
+1. Output a JSON result block:
+\`\`\`json
+{
+  \"status\": \"COMPLETE\",
+  \"story_id\": \"$story_id\",
+  \"summary\": \"<brief description of what was implemented>\",
+  \"files_changed\": [\"<list of files created/modified>\"],
+  \"tests_added\": <number>,
+  \"decisions\": [{\"what\": \"<key decision>\", \"why\": \"<reasoning>\"}]
+}
+\`\`\`
+
+2. Then output exactly: IMPLEMENTATION COMPLETE: $story_id
 
 If a HALT condition is triggered or implementation is blocked:
-Output exactly: IMPLEMENTATION BLOCKED: $story_id - [specific reason]
+
+1. Output a JSON result block with status \"BLOCKED\" and issues array describing blockers
+2. Then output exactly: IMPLEMENTATION BLOCKED: $story_id - [specific reason]
 
 ## Begin Execution
 
@@ -765,17 +819,48 @@ Stage all changes with: git add -A (after implementation is complete)"
 
     echo "$result" >> "$LOG_FILE"
 
-    if echo "$result" | grep -q "IMPLEMENTATION COMPLETE"; then
-        log_success "Dev phase complete: $story_id"
-        return 0
-    elif echo "$result" | grep -q "IMPLEMENTATION BLOCKED"; then
-        log_error "Dev phase blocked: $story_id"
-        echo "$result" | grep "IMPLEMENTATION BLOCKED"
-        return 1
+    # Check completion using JSON parsing with text fallback
+    local completion_status
+    if type check_phase_completion >/dev/null 2>&1; then
+        check_phase_completion "$result" "dev" "$story_id"
+        completion_status=$?
     else
-        log_error "Dev phase did not complete cleanly: $story_id"
-        return 1
+        # Fallback to legacy detection
+        if echo "$result" | grep -q "IMPLEMENTATION COMPLETE"; then
+            completion_status=0
+        elif echo "$result" | grep -q "IMPLEMENTATION BLOCKED"; then
+            completion_status=1
+        else
+            completion_status=2
+        fi
     fi
+
+    case $completion_status in
+        0)
+            # Extract decisions for decision log if available
+            if type get_result_decisions >/dev/null 2>&1 && type append_to_decision_log >/dev/null 2>&1; then
+                local decisions=$(get_result_decisions)
+                if [ "$decisions" != "[]" ] && [ -n "$decisions" ]; then
+                    append_to_decision_log "DEV" "$story_id" "Decisions: $decisions"
+                fi
+            fi
+            log_success "Dev phase complete: $story_id"
+            return 0
+            ;;
+        1)
+            log_error "Dev phase blocked: $story_id"
+            if type get_result_summary >/dev/null 2>&1; then
+                local summary=$(get_result_summary)
+                [ -n "$summary" ] && echo "Reason: $summary"
+            fi
+            echo "$result" | grep "IMPLEMENTATION BLOCKED" || true
+            return 1
+            ;;
+        *)
+            log_error "Dev phase did not complete cleanly: $story_id"
+            return 1
+            ;;
+    esac
 }
 
 # Global variable to store review findings for fix loop
@@ -882,22 +967,45 @@ When the workflow presents options:
 ## Completion Signals
 
 When review passes (all HIGH/MEDIUM issues fixed, all ACs implemented, status set to 'done'):
-Output exactly: REVIEW PASSED: $story_id
 
-When review passes but required fixes:
-Output exactly: REVIEW PASSED WITH FIXES: $story_id - Fixed N issues
+1. Output a JSON result block:
+\`\`\`json
+{
+  \"status\": \"PASSED\",
+  \"story_id\": \"$story_id\",
+  \"summary\": \"<what was reviewed and any fixes made>\",
+  \"files_changed\": [\"<files modified during review>\"],
+  \"issues\": []
+}
+\`\`\`
+
+2. Then output exactly: REVIEW PASSED: $story_id
+   Or if fixes were made: REVIEW PASSED WITH FIXES: $story_id - Fixed N issues
 
 If review fails (unfixable issues, missing acceptance criteria that YOU cannot fix):
-1. First output a structured findings block:
+
+1. Output a JSON result block with issues:
+\`\`\`json
+{
+  \"status\": \"FAILED\",
+  \"story_id\": \"$story_id\",
+  \"summary\": \"<summary of why review failed>\",
+  \"issues\": [
+    {\"severity\": \"HIGH\", \"description\": \"<issue>\", \"location\": \"<file:line>\"},
+    {\"severity\": \"MEDIUM\", \"description\": \"<issue>\", \"location\": \"<file:line>\"}
+  ]
+}
+\`\`\`
+
+2. Then output the legacy findings block:
 \`\`\`
 REVIEW FINDINGS START
 - [HIGH] Description of issue 1 (file:line if applicable)
-- [HIGH] Description of issue 2
-- [MEDIUM] Description of issue 3
-... all HIGH and MEDIUM issues that need dev attention ...
+- [MEDIUM] Description of issue 2
 REVIEW FINDINGS END
 \`\`\`
-2. Then output exactly: REVIEW FAILED: $story_id - [summary reason]
+
+3. Then output exactly: REVIEW FAILED: $story_id - [summary reason]
 
 ## Begin Execution
 
@@ -917,25 +1025,56 @@ Stage any fixes with: git add -A"
 
     echo "$result" >> "$LOG_FILE"
 
-    if echo "$result" | grep -q "REVIEW PASSED"; then
-        log_success "Review passed: $story_id"
-        return 0
-    elif echo "$result" | grep -q "REVIEW FAILED"; then
-        log_error "Review failed: $story_id"
-        echo "$result" | grep "REVIEW FAILED"
-
-        # Extract findings for fix loop
-        LAST_REVIEW_FINDINGS=$(echo "$result" | sed -n '/REVIEW FINDINGS START/,/REVIEW FINDINGS END/p' | grep -E '^\s*-\s*\[(HIGH|MEDIUM)\]' || true)
-
-        if [ -n "$LAST_REVIEW_FINDINGS" ]; then
-            log "Captured ${#LAST_REVIEW_FINDINGS} bytes of review findings for fix loop"
-        fi
-
-        return 1
+    # Check completion using JSON parsing with text fallback
+    local completion_status
+    if type check_phase_completion >/dev/null 2>&1; then
+        check_phase_completion "$result" "review" "$story_id"
+        completion_status=$?
     else
-        log_warn "Review did not complete cleanly: $story_id"
-        return 1
+        # Fallback to legacy detection
+        if echo "$result" | grep -q "REVIEW PASSED"; then
+            completion_status=0
+        elif echo "$result" | grep -q "REVIEW FAILED"; then
+            completion_status=1
+        else
+            completion_status=2
+        fi
     fi
+
+    case $completion_status in
+        0)
+            log_success "Review passed: $story_id"
+            return 0
+            ;;
+        1)
+            log_error "Review failed: $story_id"
+            echo "$result" | grep "REVIEW FAILED" || true
+
+            # Extract findings for fix loop - try JSON first, then legacy
+            if type get_result_issues >/dev/null 2>&1; then
+                local json_issues=$(get_result_issues)
+                if [ "$json_issues" != "[]" ] && [ -n "$json_issues" ]; then
+                    # Convert JSON issues to text format for fix phase
+                    LAST_REVIEW_FINDINGS=$(echo "$json_issues" | jq -r '.[] | "- [\(.severity)] \(.description) (\(.location // "unknown"))"' 2>/dev/null || echo "")
+                fi
+            fi
+
+            # Fallback to legacy text extraction if JSON didn't work
+            if [ -z "$LAST_REVIEW_FINDINGS" ]; then
+                LAST_REVIEW_FINDINGS=$(echo "$result" | sed -n '/REVIEW FINDINGS START/,/REVIEW FINDINGS END/p' | grep -E '^\s*-\s*\[(HIGH|MEDIUM)\]' || true)
+            fi
+
+            if [ -n "$LAST_REVIEW_FINDINGS" ]; then
+                log "Captured review findings for fix loop"
+            fi
+
+            return 1
+            ;;
+        *)
+            log_warn "Review did not complete cleanly: $story_id"
+            return 1
+            ;;
+    esac
 }
 
 execute_fix_phase() {
@@ -1062,10 +1201,33 @@ $story_contents
 ## Completion Signals
 
 When ALL review issues are successfully fixed:
-Output exactly: FIX COMPLETE: $story_id - Fixed [N] issues
+
+1. Output a JSON result block:
+\`\`\`json
+{
+  \"status\": \"COMPLETE\",
+  \"story_id\": \"$story_id\",
+  \"summary\": \"Fixed N issues: <brief list>\",
+  \"files_changed\": [\"<files modified>\"],
+  \"issues\": []
+}
+\`\`\`
+
+2. Then output exactly: FIX COMPLETE: $story_id - Fixed [N] issues
 
 If unable to fix one or more issues:
-Output exactly: FIX INCOMPLETE: $story_id - [reason and which issues remain]
+
+1. Output a JSON result block with remaining issues:
+\`\`\`json
+{
+  \"status\": \"FAILED\",
+  \"story_id\": \"$story_id\",
+  \"summary\": \"<what was fixed and what remains>\",
+  \"issues\": [{\"severity\": \"HIGH\", \"description\": \"<remaining issue>\", \"location\": \"<file:line>\"}]
+}
+\`\`\`
+
+2. Then output exactly: FIX INCOMPLETE: $story_id - [reason and which issues remain]
 
 ## Begin Execution
 
@@ -1082,20 +1244,40 @@ Address all review findings now. This is attempt $attempt_num of 3."
 
     echo "$result" >> "$LOG_FILE"
 
-    if echo "$result" | grep -q "FIX COMPLETE"; then
-        log_success "Fix phase complete: $story_id (attempt $attempt_num)"
-        record_fix_attempt "$story_id" "$attempt_num" "success"
-        return 0
-    elif echo "$result" | grep -q "FIX INCOMPLETE"; then
-        log_error "Fix phase incomplete: $story_id (attempt $attempt_num)"
-        echo "$result" | grep "FIX INCOMPLETE"
-        record_fix_attempt "$story_id" "$attempt_num" "failed"
-        return 1
+    # Check completion using JSON parsing with text fallback
+    local completion_status
+    if type check_phase_completion >/dev/null 2>&1; then
+        check_phase_completion "$result" "fix" "$story_id"
+        completion_status=$?
     else
-        log_warn "Fix phase did not complete cleanly: $story_id (attempt $attempt_num)"
-        record_fix_attempt "$story_id" "$attempt_num" "failed"
-        return 1
+        # Fallback to legacy detection
+        if echo "$result" | grep -q "FIX COMPLETE"; then
+            completion_status=0
+        elif echo "$result" | grep -q "FIX INCOMPLETE"; then
+            completion_status=1
+        else
+            completion_status=2
+        fi
     fi
+
+    case $completion_status in
+        0)
+            log_success "Fix phase complete: $story_id (attempt $attempt_num)"
+            record_fix_attempt "$story_id" "$attempt_num" "success"
+            return 0
+            ;;
+        1)
+            log_error "Fix phase incomplete: $story_id (attempt $attempt_num)"
+            echo "$result" | grep "FIX INCOMPLETE" || true
+            record_fix_attempt "$story_id" "$attempt_num" "failed"
+            return 1
+            ;;
+        *)
+            log_warn "Fix phase did not complete cleanly: $story_id (attempt $attempt_num)"
+            record_fix_attempt "$story_id" "$attempt_num" "failed"
+            return 1
+            ;;
+    esac
 }
 
 # =============================================================================
@@ -1854,12 +2036,49 @@ execute_story_with_fix_loop() {
     # DESIGN PHASE (Context 0) - Pre-implementation planning
     if [ "$SKIP_DESIGN" = false ] && type execute_design_phase >/dev/null 2>&1; then
         if ! execute_design_phase "$story_file"; then
-            log_warn "Design phase did not complete cleanly for $story_id - proceeding to dev"
+            log_warn "Design phase did not complete cleanly for $story_id - proceeding"
             # Don't fail - design is advisory
         fi
     fi
 
-    # DEV PHASE (Context 1)
+    # TDD PHASES (Test-First Development)
+    # Enabled by default, skip with --skip-tdd or individual --skip-test-spec/--skip-test-impl
+    if [ "$SKIP_TDD" = false ]; then
+
+        # TEST SPEC PHASE - Generate test specifications from acceptance criteria
+        if [ "$SKIP_TEST_SPEC" = false ] && type execute_test_spec_phase >/dev/null 2>&1; then
+            if ! execute_test_spec_phase "$story_file"; then
+                log_warn "Test spec phase did not complete cleanly for $story_id - proceeding"
+                # Don't fail - spec generation is advisory
+            fi
+        fi
+
+        # TEST IMPL PHASE - Create failing tests from specifications
+        if [ "$SKIP_TEST_IMPL" = false ] && type execute_test_impl_phase >/dev/null 2>&1; then
+            # Only run if we have test specs (either just generated or loaded from file)
+            if [ -n "$LAST_TEST_SPEC" ] || [ -f "$TEST_SPEC_DIR/${story_id}-test-spec.md" ] 2>/dev/null; then
+                if ! execute_test_impl_phase "$story_file"; then
+                    log_warn "Test impl phase did not complete cleanly for $story_id - proceeding"
+                    # Don't fail - test impl is advisory in first iteration
+                fi
+            else
+                log_warn "No test specifications available - skipping test implementation"
+            fi
+        fi
+
+        # TEST VERIFICATION PHASE - Verify tests fail appropriately
+        if [ "$SKIP_TEST_IMPL" = false ] && type execute_test_verification_phase >/dev/null 2>&1; then
+            # Only verify if we just created tests
+            if type get_last_test_spec >/dev/null 2>&1 && [ -n "$(get_last_test_spec)" ]; then
+                if ! execute_test_verification_phase "$story_file"; then
+                    log_warn "Test verification had issues - proceeding to dev phase"
+                    # Don't fail - verification is informational
+                fi
+            fi
+        fi
+    fi
+
+    # DEV PHASE (Context 1) - Now implements to make tests pass (if TDD enabled)
     if ! execute_dev_phase "$story_file"; then
         log_error "Dev phase failed for $story_id"
         return 1
