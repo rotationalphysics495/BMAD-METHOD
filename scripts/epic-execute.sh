@@ -21,6 +21,83 @@
 set -e
 
 # =============================================================================
+# Cleanup and Signal Handling
+# =============================================================================
+
+# Track execution state for cleanup
+CURRENT_STORY_INDEX=0
+CLEANUP_DONE=false
+
+cleanup() {
+    # Prevent recursive cleanup
+    if [ "$CLEANUP_DONE" = true ]; then
+        return
+    fi
+    CLEANUP_DONE=true
+
+    local exit_code=$?
+
+    # Disable trap during cleanup
+    trap - EXIT INT TERM
+
+    echo ""
+    log "Cleaning up (exit code: $exit_code)..."
+
+    # Finalize metrics if initialized
+    if [ -n "$METRICS_FILE" ] && [ -f "$METRICS_FILE" ]; then
+        local duration=0
+        if [ -n "$EPIC_START_SECONDS" ]; then
+            duration=$(($(date +%s) - EPIC_START_SECONDS))
+        fi
+
+        # Only finalize if we have story data
+        if [ "${#STORIES[@]}" -gt 0 ] 2>/dev/null; then
+            finalize_metrics "${#STORIES[@]}" "${COMPLETED:-0}" "${FAILED:-0}" "${SKIPPED:-0}" "$duration"
+            log "Metrics finalized: $METRICS_FILE"
+        fi
+    fi
+
+    # Report git status
+    if command -v git >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/.git" ] 2>/dev/null; then
+        local uncommitted
+        uncommitted=$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$uncommitted" -gt 0 ]; then
+            log_warn "Uncommitted changes remain ($uncommitted files). Review with 'git status'"
+        fi
+    fi
+
+    # Save checkpoint for resume capability
+    if [ -n "$SPRINT_ARTIFACTS_DIR" ] && [ -n "$EPIC_ID" ] && [ -d "$SPRINT_ARTIFACTS_DIR" ] 2>/dev/null; then
+        local checkpoint_file="$SPRINT_ARTIFACTS_DIR/.epic-${EPIC_ID}-checkpoint"
+        {
+            echo "# Epic $EPIC_ID checkpoint - $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "LAST_STORY_INDEX=$CURRENT_STORY_INDEX"
+            echo "COMPLETED=${COMPLETED:-0}"
+            echo "FAILED=${FAILED:-0}"
+            echo "SKIPPED=${SKIPPED:-0}"
+            echo "EXIT_CODE=$exit_code"
+        } > "$checkpoint_file" 2>/dev/null || true
+
+        if [ $exit_code -ne 0 ]; then
+            log "Checkpoint saved: $checkpoint_file"
+        fi
+    fi
+
+    # Log final state on non-zero exit
+    if [ $exit_code -ne 0 ]; then
+        log_error "Epic execution interrupted (exit code: $exit_code)"
+        if [ -n "$EPIC_ID" ]; then
+            log "Resume with: $0 $EPIC_ID --start-from <story-id>"
+        fi
+    fi
+
+    exit $exit_code
+}
+
+# Register trap for cleanup on exit, interrupt, or termination
+trap cleanup EXIT INT TERM
+
+# =============================================================================
 # Configuration
 # =============================================================================
 
@@ -112,6 +189,180 @@ log_error() {
 log_warn() {
     echo -e "${YELLOW}[!]${NC} $1"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] $1" >> "$LOG_FILE"
+}
+
+# =============================================================================
+# Git Safety Functions
+# =============================================================================
+
+# Patterns for sensitive files that should never be committed
+SENSITIVE_FILE_PATTERNS=(
+    "\.env$"
+    "\.env\."
+    "credentials\.json$"
+    "secrets\.json$"
+    "\.secrets$"
+    "\.pem$"
+    "\.key$"
+    "\.p12$"
+    "id_rsa"
+    "\.credentials$"
+    "\.npmrc$"
+    "\.pypirc$"
+)
+
+# Check for untracked sensitive files that would be staged by git add -A
+# Returns 0 if safe, 1 if sensitive files found
+check_sensitive_files() {
+    if [ ! -d "$PROJECT_ROOT/.git" ]; then
+        return 0  # Not a git repo, nothing to check
+    fi
+
+    local has_issues=false
+
+    # Get list of untracked files that would be staged
+    local untracked_files
+    untracked_files=$(git -C "$PROJECT_ROOT" ls-files --others --exclude-standard 2>/dev/null || true)
+
+    if [ -z "$untracked_files" ]; then
+        return 0  # No untracked files
+    fi
+
+    # Check each sensitive pattern
+    for pattern in "${SENSITIVE_FILE_PATTERNS[@]}"; do
+        local matches
+        matches=$(echo "$untracked_files" | grep -E "$pattern" 2>/dev/null || true)
+
+        if [ -n "$matches" ]; then
+            while IFS= read -r file; do
+                [ -z "$file" ] && continue
+
+                # Check if file is gitignored (it shouldn't match if we got it from ls-files --others)
+                if ! git -C "$PROJECT_ROOT" check-ignore -q "$PROJECT_ROOT/$file" 2>/dev/null; then
+                    log_error "SAFETY: Sensitive file '$file' is untracked and not gitignored"
+                    has_issues=true
+                fi
+            done <<< "$matches"
+        fi
+    done
+
+    if [ "$has_issues" = true ]; then
+        log_error "Add sensitive files to .gitignore before committing"
+        log_error "Or use --no-commit to skip automatic commits"
+        return 1
+    fi
+
+    return 0
+}
+
+# =============================================================================
+# Prompt Size Management
+# =============================================================================
+
+# Maximum prompt size in bytes (default ~150KB, well under Claude's context limit)
+MAX_PROMPT_SIZE="${MAX_PROMPT_SIZE:-150000}"
+
+# Priority levels for content inclusion
+CONTENT_PRIORITY_CRITICAL=1   # Story, core workflow instructions (always include)
+CONTENT_PRIORITY_HIGH=2       # Architecture, checklist
+CONTENT_PRIORITY_MEDIUM=3     # Decision log, design context
+CONTENT_PRIORITY_LOW=4        # Full workflow YAML (truncate first)
+
+# Get size of a string in bytes
+get_byte_size() {
+    local content="$1"
+    printf '%s' "$content" | wc -c | tr -d ' '
+}
+
+# Truncate content to a maximum size, preserving structure
+# Arguments:
+#   $1 - content to truncate
+#   $2 - max size in bytes
+#   $3 - label for logging (optional)
+truncate_content() {
+    local content="$1"
+    local max_size="$2"
+    local label="${3:-Content}"
+
+    local current_size
+    current_size=$(get_byte_size "$content")
+
+    if [ "$current_size" -le "$max_size" ]; then
+        printf '%s' "$content"
+        return 0
+    fi
+
+    [ "$VERBOSE" = true ] && log_warn "$label truncated: ${current_size}B -> ${max_size}B"
+
+    # Truncate and add notice
+    local truncated
+    truncated=$(printf '%s' "$content" | head -c "$max_size")
+    printf '%s\n\n... [CONTENT TRUNCATED - %sB total, showing first %sB] ...' "$truncated" "$current_size" "$max_size"
+}
+
+# Build a prompt with size limits
+# Adds content in priority order until limit reached
+# Arguments:
+#   $1 - base prompt (critical, always included)
+#   Remaining args: triplets of "label|priority|content"
+# Note: This is a simplified version - for complex prompts, build manually with truncate_content
+build_sized_prompt() {
+    local base_prompt="$1"
+    shift
+
+    local current_size
+    current_size=$(get_byte_size "$base_prompt")
+    local final_prompt="$base_prompt"
+    local remaining=$((MAX_PROMPT_SIZE - current_size - 5000))  # Reserve 5KB for output
+
+    # Process content blocks
+    while [ $# -ge 3 ]; do
+        local label="$1"
+        local priority="$2"
+        local content="$3"
+        shift 3
+
+        local content_size
+        content_size=$(get_byte_size "$content")
+
+        if [ "$content_size" -eq 0 ]; then
+            continue
+        fi
+
+        if [ "$content_size" -le "$remaining" ]; then
+            # Fits entirely
+            final_prompt+="$content"
+            remaining=$((remaining - content_size))
+        elif [ "$priority" -le "$CONTENT_PRIORITY_HIGH" ]; then
+            # Critical/high priority - truncate but include
+            local truncated
+            truncated=$(truncate_content "$content" "$remaining" "$label")
+            final_prompt+="$truncated"
+            remaining=0
+        else
+            # Lower priority - skip entirely
+            [ "$VERBOSE" = true ] && log_warn "Skipping $label (${content_size}B) due to size limit"
+        fi
+
+        if [ "$remaining" -le 0 ]; then
+            [ "$VERBOSE" = true ] && log_warn "Prompt size limit reached (${MAX_PROMPT_SIZE}B)"
+            break
+        fi
+    done
+
+    printf '%s' "$final_prompt"
+}
+
+# Log prompt size in verbose mode
+log_prompt_size() {
+    local prompt="$1"
+    local phase_name="${2:-prompt}"
+
+    if [ "$VERBOSE" = true ]; then
+        local prompt_size
+        prompt_size=$(get_byte_size "$prompt")
+        log "Prompt size ($phase_name): ${prompt_size}B / ${MAX_PROMPT_SIZE}B limit"
+    fi
 }
 
 # =============================================================================
@@ -609,38 +860,72 @@ log "Discovering stories..."
 STORY_LOCATIONS=("$STORIES_DIR" "$SPRINT_ARTIFACTS_DIR" "$SPRINTS_DIR")
 STORIES=()
 
+# Use associative array for O(1) deduplication (bash 4+)
+# Fallback to path comparison for bash 3.x
+if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then
+    declare -A SEEN_STORIES
+fi
+
+# Helper function to check if story is already discovered
+is_story_duplicate() {
+    local file="$1"
+    local normalized
+    # Normalize path for comparison (handles symlinks, relative paths)
+    normalized=$(cd "$(dirname "$file")" 2>/dev/null && pwd)/$(basename "$file") 2>/dev/null || normalized="$file"
+
+    if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then
+        if [ -n "${SEEN_STORIES[$normalized]:-}" ]; then
+            return 0  # Is duplicate
+        fi
+        SEEN_STORIES[$normalized]=1
+        return 1  # Not duplicate
+    else
+        # Bash 3.x fallback: iterate through array
+        for existing in "${STORIES[@]}"; do
+            local existing_norm
+            existing_norm=$(cd "$(dirname "$existing")" 2>/dev/null && pwd)/$(basename "$existing") 2>/dev/null || existing_norm="$existing"
+            if [ "$normalized" = "$existing_norm" ]; then
+                return 0  # Is duplicate
+            fi
+        done
+        return 1  # Not duplicate
+    fi
+}
+
 for search_dir in "${STORY_LOCATIONS[@]}"; do
     if [ ! -d "$search_dir" ]; then
         continue
     fi
-    
-    # Method 1: Stories that reference this epic in content
+
+    # Method 1: Stories that reference this epic in content (with word boundary)
+    # Use ([^0-9]|$) to ensure "Epic: 1" doesn't match "Epic: 10" or "Epic: 100"
     while IFS= read -r -d '' file; do
-        if [[ ! " ${STORIES[*]} " =~ " ${file} " ]]; then
+        if ! is_story_duplicate "$file"; then
             STORIES+=("$file")
         fi
-    done < <(grep -l -Z "Epic.*:.*${EPIC_ID}\|epic-${EPIC_ID}\|Epic.*${EPIC_ID}" "$search_dir"/*.md 2>/dev/null || true)
-    
+    done < <(grep -l -Z -E "(Epic[[:space:]]*:[[:space:]]*${EPIC_ID}([^0-9]|$)|epic-${EPIC_ID}([^0-9]|$)|Epic[[:space:]]+${EPIC_ID}([^0-9]|$))" "$search_dir"/*.md 2>/dev/null || true)
+
     # Method 2: {EpicNumber}-{StoryNumber}-{description}.md (e.g., 1-1-user-registration.md)
+    # Use more specific pattern: EPIC_ID followed by dash and digit
     while IFS= read -r -d '' file; do
-        if [[ ! " ${STORIES[*]} " =~ " ${file} " ]]; then
+        if ! is_story_duplicate "$file"; then
             STORIES+=("$file")
         fi
-    done < <(find "$search_dir" -name "${EPIC_ID}-*-*.md" -print0 2>/dev/null || true)
-    
+    done < <(find "$search_dir" -maxdepth 1 -name "${EPIC_ID}-[0-9]*-*.md" -print0 2>/dev/null || true)
+
     # Method 3: story-{epic}.{seq}-*.md (BMAD standard)
     while IFS= read -r -d '' file; do
-        if [[ ! " ${STORIES[*]} " =~ " ${file} " ]]; then
+        if ! is_story_duplicate "$file"; then
             STORIES+=("$file")
         fi
-    done < <(find "$search_dir" -name "story-${EPIC_ID}.*-*.md" -print0 2>/dev/null || true)
-    
-    # Method 4: story-{epic}-*.md (BMAD alternate)
+    done < <(find "$search_dir" -maxdepth 1 -name "story-${EPIC_ID}.[0-9]*-*.md" -print0 2>/dev/null || true)
+
+    # Method 4: story-{epic}-{seq}-*.md (BMAD alternate)
     while IFS= read -r -d '' file; do
-        if [[ ! " ${STORIES[*]} " =~ " ${file} " ]]; then
+        if ! is_story_duplicate "$file"; then
             STORIES+=("$file")
         fi
-    done < <(find "$search_dir" -name "story-${EPIC_ID}-*.md" -print0 2>/dev/null || true)
+    done < <(find "$search_dir" -maxdepth 1 -name "story-${EPIC_ID}-[0-9]*-*.md" -print0 2>/dev/null || true)
 done
 
 if [ ${#STORIES[@]} -eq 0 ]; then
@@ -693,10 +978,17 @@ execute_dev_phase() {
     local workflow_executor=$(cat "$WORKFLOW_EXECUTOR")
     local story_contents=$(cat "$story_file")
 
-    # Get decision log context if available
+    # Get decision log context if available (with size limit)
     local decision_context=""
     if type get_decision_log_context >/dev/null 2>&1; then
         decision_context=$(get_decision_log_context)
+        # Limit decision log to prevent context overflow
+        local dec_size
+        dec_size=$(get_byte_size "$decision_context")
+        if [ "$dec_size" -gt 20000 ]; then
+            decision_context=$(printf '%s' "$decision_context" | tail -c 20000)
+            [ "$VERBOSE" = true ] && log_warn "Decision log truncated to last 20KB"
+        fi
     fi
 
     # Get design context if available (from design phase)
@@ -709,6 +1001,14 @@ execute_dev_phase() {
     local test_spec_context=""
     if type build_test_spec_context_for_dev >/dev/null 2>&1; then
         test_spec_context=$(build_test_spec_context_for_dev "$story_id")
+    fi
+
+    # Truncate large workflow files if needed to stay within context limits
+    local workflow_yaml_truncated="$workflow_yaml"
+    local yaml_size
+    yaml_size=$(get_byte_size "$workflow_yaml")
+    if [ "$yaml_size" -gt 10000 ]; then
+        workflow_yaml_truncated=$(truncate_content "$workflow_yaml" 10000 "Workflow YAML")
     fi
 
     # Build the dev prompt using BMAD workflow
@@ -735,7 +1035,7 @@ $workflow_executor
 ## Dev-Story Workflow Configuration
 
 <workflow-yaml>
-$workflow_yaml
+$workflow_yaml_truncated
 </workflow-yaml>
 
 ## Dev-Story Workflow Instructions
@@ -805,7 +1105,11 @@ If a HALT condition is triggered or implementation is blocked:
 ## Begin Execution
 
 Execute the dev-story workflow now. Follow all steps in exact order.
-Stage all changes with: git add -A (after implementation is complete)"
+Stage your changes with explicit file paths: git add <file1> <file2> ...
+Do NOT use 'git add -A' or 'git add .' - only stage files you created or modified."
+
+    # Log prompt size in verbose mode
+    log_prompt_size "$dev_prompt" "dev-phase"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY RUN] Would execute BMAD dev-story workflow for $story_id"
@@ -1011,7 +1315,7 @@ REVIEW FINDINGS END
 
 Execute the code-review workflow now. Follow all steps in exact order.
 You are seeing this code for the FIRST TIME - review adversarially.
-Stage any fixes with: git add -A"
+Stage any fixes with explicit file paths: git add <file1> <file2> ..."
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY RUN] Would execute BMAD code-review workflow for $story_id"
@@ -1196,7 +1500,7 @@ $story_contents
 2. After all issues are fixed:
    a. Run full test suite
    b. Update story file Dev Agent Record with fix notes
-   c. Stage all changes: git add -A
+   c. Stage changed files: git add <file1> <file2> ...
 
 ## Completion Signals
 
@@ -1658,7 +1962,7 @@ Then: ARCH VIOLATIONS: $story_id - [summary]
 
 ## Begin Execution
 
-Check architecture compliance now. Stage any fixes with: git add -A"
+Check architecture compliance now. Stage any fixes with: git add <file1> <file2> ..."
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY RUN] Would execute architecture compliance check for $story_id"
@@ -1782,7 +2086,7 @@ Then: TEST QUALITY FAILED: $story_id - Score: N/100
 
 ## Begin Execution
 
-Review test quality now. Stage any fixes with: git add -A"
+Review test quality now. Stage any fixes with: git add <file1> <file2> ..."
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY RUN] Would execute test quality review for $story_id"
@@ -1975,7 +2279,7 @@ Generate missing tests for Epic: $EPIC_ID (attempt $attempt_num of $MAX_TRACEABI
 - Generate ONLY the tests specified in the gaps
 - Follow existing test patterns in the codebase
 - Run each test to verify it passes
-- Stage changes: git add -A
+- Stage changes with explicit paths: git add <file1> <file2> ...
 
 ## Gaps to Address
 
@@ -2237,17 +2541,37 @@ commit_story() {
         log "Skipping commit (--no-commit)"
         return 0
     fi
-    
+
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY RUN] Would commit: feat(epic-$EPIC_ID): complete $story_id"
         return 0
     fi
-    
-    git add -A
-    git commit -m "feat(epic-$EPIC_ID): complete $story_id" || {
+
+    # Safety check for sensitive files before committing
+    if ! check_sensitive_files; then
+        log_error "Commit aborted due to sensitive files. Fix .gitignore or use --no-commit"
+        return 1
+    fi
+
+    # Use git add -u (tracked files only) instead of git add -A
+    # This prevents accidentally staging untracked files like .env, credentials, etc.
+    # Claude prompts instruct it to stage specific new files explicitly
+    git add -u
+
+    # Check if there's anything to commit
+    local staged_count
+    staged_count=$(git diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
+
+    if [ "$staged_count" -eq 0 ]; then
         log_warn "Nothing to commit for $story_id"
+        return 0
+    fi
+
+    git commit -m "feat(epic-$EPIC_ID): complete $story_id" || {
+        log_warn "Commit failed for $story_id"
+        return 1
     }
-    
+
     log_success "Committed: $story_id"
 }
 
@@ -2399,6 +2723,7 @@ for story_file in "${STORIES[@]}"; do
         else
             log_warn "Skipping $story_id (waiting for $START_FROM)"
             ((SKIPPED++))
+            ((CURRENT_STORY_INDEX++))
             update_story_metrics "skipped"
             continue
         fi
@@ -2409,6 +2734,7 @@ for story_file in "${STORIES[@]}"; do
         if grep -qi "^Status:.*done" "$story_file" 2>/dev/null; then
             log_warn "Skipping $story_id (Status: Done)"
             ((SKIPPED++))
+            ((CURRENT_STORY_INDEX++))
             update_story_metrics "skipped"
             continue
         fi
@@ -2425,6 +2751,7 @@ for story_file in "${STORIES[@]}"; do
         if ! execute_story_with_fix_loop "$story_file"; then
             log_error "Story execution failed for $story_id"
             ((FAILED++))
+            ((CURRENT_STORY_INDEX++))
             update_story_metrics "failed"
             continue
         fi
@@ -2433,6 +2760,7 @@ for story_file in "${STORIES[@]}"; do
         if ! execute_dev_phase "$story_file"; then
             log_error "Dev phase failed for $story_id"
             ((FAILED++))
+            ((CURRENT_STORY_INDEX++))
             update_story_metrics "failed"
             add_metrics_issue "$story_id" "dev_phase_failed" "Development phase did not complete"
             continue
@@ -2453,6 +2781,9 @@ for story_file in "${STORIES[@]}"; do
     ((COMPLETED++))
     update_story_metrics "completed"
     log_success "Story complete: $story_id ($COMPLETED/${#STORIES[@]})"
+
+    # Track progress for checkpoint/resume
+    ((CURRENT_STORY_INDEX++))
 done
 
 # =============================================================================
@@ -2493,7 +2824,8 @@ if [ "$SKIP_TRACEABILITY" = false ]; then
 
         # Commit any generated tests
         if [ "$NO_COMMIT" = false ] && [ "$DRY_RUN" = false ]; then
-            git add -A
+            # Use git add -u for safety (tracked files only)
+            git add -u
             git commit -m "test(epic-$EPIC_ID): generate missing tests for traceability (attempt $trace_fix_attempt)" 2>/dev/null || true
         fi
 

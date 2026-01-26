@@ -17,6 +17,91 @@ BASELINE_COVERAGE=0
 REGRESSION_INITIALIZED=false
 
 # =============================================================================
+# Test Count Extraction (Multi-Framework Support)
+# =============================================================================
+
+# Extract test count from test output using multiple patterns
+# Supports: Jest, Mocha, Vitest, AVA, TAP, pytest, Go, Rust, and generic formats
+# Arguments:
+#   $1 - test output string
+# Returns: Number of passing tests (echoed)
+extract_test_count() {
+    local test_output="$1"
+    local count=""
+
+    # Method 1: Try JSON output first (most reliable)
+    # Jest with --json, Vitest with --reporter=json
+    if command -v jq >/dev/null 2>&1; then
+        # Jest JSON format
+        count=$(echo "$test_output" | jq -r '.numPassedTests // empty' 2>/dev/null)
+        if [ -n "$count" ] && [ "$count" != "null" ] && [ "$count" -gt 0 ] 2>/dev/null; then
+            echo "$count"
+            return 0
+        fi
+
+        # Vitest JSON format (aggregate from testResults)
+        count=$(echo "$test_output" | jq -r '[.testResults[]?.assertionResults[]? | select(.status == "passed")] | length // empty' 2>/dev/null)
+        if [ -n "$count" ] && [ "$count" != "null" ] && [ "$count" -gt 0 ] 2>/dev/null; then
+            echo "$count"
+            return 0
+        fi
+    fi
+
+    # Method 2: Pattern matching fallbacks (ordered by specificity)
+    local patterns=(
+        # Jest standard output: "Tests:  X passed, Y failed"
+        'Tests:[[:space:]]+[0-9]+ passed'
+        # Mocha: "X passing"
+        '[0-9]+ passing'
+        # Vitest/Jest verbose: "X passed"
+        '[0-9]+ passed'
+        # Generic: "X test(s) passed"
+        '[0-9]+ tests? passed'
+        # TAP format: "# pass  X" or "# pass X"
+        '# pass[[:space:]]+[0-9]+'
+        # Rust cargo test: "test result: ok. X passed"
+        'test result: ok\. [0-9]+ passed'
+        # pytest summary: "X passed"
+        '[0-9]+ passed'
+        # AVA: "X tests passed" or "X test passed"
+        '[0-9]+ tests? passed'
+    )
+
+    for pattern in "${patterns[@]}"; do
+        count=$(echo "$test_output" | grep -oE "$pattern" | grep -oE '[0-9]+' | head -1 2>/dev/null || echo "")
+        if [ -n "$count" ] && [ "$count" != "0" ]; then
+            echo "$count"
+            return 0
+        fi
+    done
+
+    # Method 3: Count explicit PASS lines (Go test output)
+    local pass_count
+    pass_count=$(echo "$test_output" | grep -cE '^---[[:space:]]*PASS:' 2>/dev/null || echo "0")
+    if [ "$pass_count" -gt 0 ]; then
+        echo "$pass_count"
+        return 0
+    fi
+
+    # Method 4: Count checkmarks (some reporters use unicode checkmarks)
+    pass_count=$(echo "$test_output" | grep -cE '^[[:space:]]*[✓✔]' 2>/dev/null || echo "0")
+    if [ "$pass_count" -gt 0 ]; then
+        echo "$pass_count"
+        return 0
+    fi
+
+    # Method 5: Count "ok" lines (TAP format)
+    pass_count=$(echo "$test_output" | grep -cE '^ok[[:space:]]+[0-9]+' 2>/dev/null || echo "0")
+    if [ "$pass_count" -gt 0 ]; then
+        echo "$pass_count"
+        return 0
+    fi
+
+    # No tests found
+    echo "0"
+}
+
+# =============================================================================
 # Regression Gate Functions
 # =============================================================================
 
@@ -30,28 +115,22 @@ init_regression_baseline() {
 
     log "Initializing regression baseline..."
 
-    # Detect project type and capture baseline
+    local test_output=""
+
+    # Detect project type and run tests
     if [ -f "$PROJECT_ROOT/package.json" ]; then
         # Node.js/TypeScript project
         if grep -q '"test"' "$PROJECT_ROOT/package.json" 2>/dev/null; then
-            log "Capturing baseline test count..."
-            local test_output
-            test_output=$(cd "$PROJECT_ROOT" && npm test 2>&1) || true
+            log "Capturing baseline test count (Node.js)..."
 
-            # Try multiple patterns to extract passing test count
-            # Pattern 1: "X passing" (mocha/jest)
-            BASELINE_PASSING_TESTS=$(echo "$test_output" | grep -oE '[0-9]+ passing' | grep -oE '[0-9]+' | head -1 || echo "0")
-
-            # Pattern 2: "Tests: X passed" (jest)
-            if [ "$BASELINE_PASSING_TESTS" = "0" ]; then
-                BASELINE_PASSING_TESTS=$(echo "$test_output" | grep -oE 'Tests:.*[0-9]+ passed' | grep -oE '[0-9]+' | head -1 || echo "0")
+            # Check if there's a test:json script for better parsing
+            if grep -q '"test:json"' "$PROJECT_ROOT/package.json" 2>/dev/null; then
+                test_output=$(cd "$PROJECT_ROOT" && npm run test:json 2>&1) || true
+            else
+                test_output=$(cd "$PROJECT_ROOT" && npm test 2>&1) || true
             fi
 
-            # Pattern 3: "X tests passed" (generic)
-            if [ "$BASELINE_PASSING_TESTS" = "0" ]; then
-                BASELINE_PASSING_TESTS=$(echo "$test_output" | grep -oE '[0-9]+ tests? passed' | grep -oE '[0-9]+' | head -1 || echo "0")
-            fi
-
+            BASELINE_PASSING_TESTS=$(extract_test_count "$test_output")
             log "Baseline passing tests: $BASELINE_PASSING_TESTS"
         fi
 
@@ -72,27 +151,24 @@ init_regression_baseline() {
     elif [ -f "$PROJECT_ROOT/Cargo.toml" ]; then
         # Rust project
         log "Capturing baseline test count (Rust)..."
-        local test_output
         test_output=$(cd "$PROJECT_ROOT" && cargo test 2>&1) || true
-        BASELINE_PASSING_TESTS=$(echo "$test_output" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | head -1 || echo "0")
+        BASELINE_PASSING_TESTS=$(extract_test_count "$test_output")
         log "Baseline passing tests: $BASELINE_PASSING_TESTS"
 
     elif [ -f "$PROJECT_ROOT/go.mod" ]; then
         # Go project
         log "Capturing baseline test count (Go)..."
-        local test_output
         test_output=$(cd "$PROJECT_ROOT" && go test ./... -v 2>&1) || true
-        BASELINE_PASSING_TESTS=$(echo "$test_output" | grep -c "^--- PASS" || echo "0")
+        BASELINE_PASSING_TESTS=$(extract_test_count "$test_output")
         log "Baseline passing tests: $BASELINE_PASSING_TESTS"
 
     elif [ -f "$PROJECT_ROOT/requirements.txt" ] || [ -f "$PROJECT_ROOT/pyproject.toml" ]; then
         # Python project
         if command -v pytest >/dev/null 2>&1; then
             log "Capturing baseline test count (Python)..."
-            local test_output
-            test_output=$(cd "$PROJECT_ROOT" && pytest --co -q 2>&1) || true
-            BASELINE_PASSING_TESTS=$(echo "$test_output" | grep -oE '[0-9]+ tests? collected' | grep -oE '[0-9]+' | head -1 || echo "0")
-            log "Baseline test count: $BASELINE_PASSING_TESTS"
+            test_output=$(cd "$PROJECT_ROOT" && pytest -v 2>&1) || true
+            BASELINE_PASSING_TESTS=$(extract_test_count "$test_output")
+            log "Baseline passing tests: $BASELINE_PASSING_TESTS"
         fi
     fi
 
@@ -116,35 +192,30 @@ execute_regression_gate() {
     log ">>> REGRESSION GATE: $story_id"
 
     local current_tests=0
+    local test_output=""
 
     # Get current test count based on project type
     if [ -f "$PROJECT_ROOT/package.json" ]; then
-        local test_output
-        test_output=$(cd "$PROJECT_ROOT" && npm test 2>&1) || true
-
-        current_tests=$(echo "$test_output" | grep -oE '[0-9]+ passing' | grep -oE '[0-9]+' | head -1 || echo "0")
-        if [ "$current_tests" = "0" ]; then
-            current_tests=$(echo "$test_output" | grep -oE 'Tests:.*[0-9]+ passed' | grep -oE '[0-9]+' | head -1 || echo "0")
+        # Check if there's a test:json script for better parsing
+        if grep -q '"test:json"' "$PROJECT_ROOT/package.json" 2>/dev/null; then
+            test_output=$(cd "$PROJECT_ROOT" && npm run test:json 2>&1) || true
+        else
+            test_output=$(cd "$PROJECT_ROOT" && npm test 2>&1) || true
         fi
-        if [ "$current_tests" = "0" ]; then
-            current_tests=$(echo "$test_output" | grep -oE '[0-9]+ tests? passed' | grep -oE '[0-9]+' | head -1 || echo "0")
-        fi
+        current_tests=$(extract_test_count "$test_output")
 
     elif [ -f "$PROJECT_ROOT/Cargo.toml" ]; then
-        local test_output
         test_output=$(cd "$PROJECT_ROOT" && cargo test 2>&1) || true
-        current_tests=$(echo "$test_output" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | head -1 || echo "0")
+        current_tests=$(extract_test_count "$test_output")
 
     elif [ -f "$PROJECT_ROOT/go.mod" ]; then
-        local test_output
         test_output=$(cd "$PROJECT_ROOT" && go test ./... -v 2>&1) || true
-        current_tests=$(echo "$test_output" | grep -c "^--- PASS" || echo "0")
+        current_tests=$(extract_test_count "$test_output")
 
     elif [ -f "$PROJECT_ROOT/requirements.txt" ] || [ -f "$PROJECT_ROOT/pyproject.toml" ]; then
         if command -v pytest >/dev/null 2>&1; then
-            local test_output
             test_output=$(cd "$PROJECT_ROOT" && pytest -v 2>&1) || true
-            current_tests=$(echo "$test_output" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | head -1 || echo "0")
+            current_tests=$(extract_test_count "$test_output")
         fi
     fi
 
