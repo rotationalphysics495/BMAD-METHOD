@@ -157,16 +157,16 @@ This workflow uses shell orchestration similar to epic-execute:
 
 ```bash
 # Analyze and plan (no execution)
-./.bmad/scripts/epic-chain.sh 36 37 38 --analyze-only
+./_bmad/scripts/epic-chain.sh 36 37 38 --analyze-only
 
 # Execute with analysis
-./.bmad/scripts/epic-chain.sh 36 37 38
+./_bmad/scripts/epic-chain.sh 36 37 38
 
 # Resume from specific epic
-./.bmad/scripts/epic-chain.sh 36 37 38 --start-from 37
+./_bmad/scripts/epic-chain.sh 36 37 38 --start-from 37
 
 # Skip already-done epics
-./.bmad/scripts/epic-chain.sh 36 37 38 --skip-done
+./_bmad/scripts/epic-chain.sh 36 37 38 --skip-done
 ```
 
 ## Context Handoff Between Epics
@@ -204,7 +204,7 @@ Via SM Agent:
 
 Via Shell (after planning):
 ```bash
-./.bmad/scripts/epic-chain.sh 36 37 38
+./_bmad/scripts/epic-chain.sh 36 37 38
 ```
 
 ## Configuration

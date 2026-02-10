@@ -122,6 +122,16 @@ Epics and stories are now created *after* architecture. This produces better qua
 2. Run `check-implementation-readiness` (`/bmad-bmm-check-implementation-readiness`)
 3. Validates cohesion across all planning documents
 
+### Project Context (Recommended for Existing Codebases)
+
+If you're working on an existing codebase, generate `project-context.md` before implementation:
+
+1. Load the **Analyst agent** (`/bmad-agent-bmm-analyst`) in a new chat
+2. Run `generate-project-context` (`/bmad-bmm-generate-project-context`)
+3. Output: `project-context.md` with coding standards, patterns, and constraints
+
+All Phase 4 workflows automatically load this file if it exists, ensuring AI agents follow your project's conventions. For new greenfield projects, this is optional.
+
 ## Step 2: Build Your Project
 
 Once planning is complete, move to implementation. **Each workflow should run in a fresh chat.**
@@ -173,6 +183,7 @@ your-project/
 | `create-architecture`            | `/bmad-bmm-create-architecture`            | Architect | Create architecture document         |
 | `create-epics-and-stories`       | `/bmad-bmm-create-epics-and-stories`       | PM        | Break down PRD into epics            |
 | `check-implementation-readiness` | `/bmad-bmm-check-implementation-readiness` | Architect | Validate planning cohesion           |
+| `generate-project-context`       | `/bmad-bmm-generate-project-context`       | Analyst   | Capture codebase rules for AI agents |
 | `sprint-planning`                | `/bmad-bmm-sprint-planning`                | SM        | Initialize sprint tracking           |
 | `create-story`                   | `/bmad-bmm-create-story`                   | SM        | Create a story file                  |
 | `dev-story`                      | `/bmad-bmm-dev-story`                      | DEV       | Implement a story                    |

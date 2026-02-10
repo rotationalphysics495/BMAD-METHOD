@@ -56,6 +56,8 @@ Bug fixes, small features, clear scope — 3 commands - 1 Optional Agent:
 2. `/dev-story` — implements each story
 3. `/code-review` — validates quality
 
+> **Tip:** For existing codebases, run `/generate-project-context` first to capture implementation rules AI agents should follow.
+
 ### Full Planning Path (BMad Method)
 
 Products, platforms, complex features — structured planning then build:
@@ -65,7 +67,8 @@ Products, platforms, complex features — structured planning then build:
 3. `/create-architecture` — technical decisions and system design
 4. `/create-epics-and-stories` — break work into prioritized stories
 5. `/sprint-planning` — initialize sprint tracking
-6. **Repeat per story:** `/create-story` → `/dev-story` → `/code-review`
+6. **For established projects:** `/generate-project-context` — capture codebase conventions for AI agents
+7. **Repeat per story:** `/create-story` → `/dev-story` → `/code-review`
 
 Every step tells you what's next. Optional phases (brainstorming, research, UX design) are available when you need them — ask `/bmad-help` anytime. For a detailed walkthrough, see the [Getting Started Tutorial](http://docs.bmad-method.org/tutorials/getting-started/).
 

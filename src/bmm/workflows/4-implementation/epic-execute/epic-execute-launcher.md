@@ -23,17 +23,17 @@ Tell the user to run one of these commands:
 
 **Dry run (recommended first):**
 ```bash
-./.bmad/scripts/epic-execute.sh {epic_id} --dry-run --verbose
+./_bmad/scripts/epic-execute.sh {epic_id} --dry-run --verbose
 ```
 
 **Full execution:**
 ```bash
-./.bmad/scripts/epic-execute.sh {epic_id}
+./_bmad/scripts/epic-execute.sh {epic_id}
 ```
 
 **With verbose output:**
 ```bash
-./.bmad/scripts/epic-execute.sh {epic_id} --verbose
+./_bmad/scripts/epic-execute.sh {epic_id} --verbose
 ```
 
 ### Step 4: Explain What Happens

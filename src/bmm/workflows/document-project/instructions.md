@@ -10,47 +10,9 @@
 
 <step n="1" goal="Validate workflow and get project info">
 
-<invoke-workflow path="{project-root}/_bmad/bmm/workflows/workflow-status">
-  <param>mode: data</param>
-  <param>data_request: project_config</param>
-</invoke-workflow>
-
-<check if="status_exists == false">
-  <output>{{suggestion}}</output>
-  <output>Note: Documentation workflow can run standalone. Continuing without progress tracking.</output>
-  <action>Set standalone_mode = true</action>
-  <action>Set status_file_found = false</action>
-</check>
-
-<check if="status_exists == true">
-  <action>Store {{status_file_path}} for later updates</action>
-  <action>Set status_file_found = true</action>
-
-  <!-- Extract brownfield/greenfield from status data -->
-  <check if="field_type == 'greenfield'">
-    <output>Note: This is a greenfield project. Documentation workflow is typically for brownfield projects.</output>
-    <ask>Continue anyway to document planning artifacts? (y/n)</ask>
-    <check if="n">
-      <action>Exit workflow</action>
-    </check>
-  </check>
-
-  <!-- Now validate sequencing -->
-  <invoke-workflow path="{project-root}/_bmad/bmm/workflows/workflow-status">
-    <param>mode: validate</param>
-    <param>calling_workflow: document-project</param>
-  </invoke-workflow>
-
-  <check if="warning != ''">
-    <output>{{warning}}</output>
-    <output>Note: This may be auto-invoked by prd for brownfield documentation.</output>
-    <ask>Continue with documentation? (y/n)</ask>
-    <check if="n">
-      <output>{{suggestion}}</output>
-      <action>Exit workflow</action>
-    </check>
-  </check>
-</check>
+<output>Note: Documentation workflow running in standalone mode. Continuing without progress tracking.</output>
+<action>Set standalone_mode = true</action>
+<action>Set status_file_found = false</action>
 
 </step>
 
@@ -177,18 +139,6 @@ Your choice [1/2/3]:
 
 <step n="4" goal="Update status and complete">
 
-<check if="status_file_found == true">
-  <invoke-workflow path="{project-root}/_bmad/bmm/workflows/workflow-status">
-    <param>mode: update</param>
-    <param>action: complete_workflow</param>
-    <param>workflow_name: document-project</param>
-  </invoke-workflow>
-
-  <check if="success == true">
-    <output>Status updated!</output>
-  </check>
-</check>
-
 <output>**✅ Document Project Workflow Complete, {user_name}!**
 
 **Documentation Generated:**
@@ -197,23 +147,10 @@ Your choice [1/2/3]:
 - Scan Level: {{scan_level}}
 - Output: {output_folder}/index.md and related files
 
-{{#if status_file_found}}
-**Status Updated:**
-
-- Progress tracking updated
-
 **Next Steps:**
-
-- **Next required:** {{next_workflow}} ({{next_agent}} agent)
-
-Check status anytime with: `workflow-status`
-{{else}}
-**Next Steps:**
-Since no workflow is in progress:
 
 - Refer to the BMM workflow guide if unsure what to do next
 - Or run `workflow-init` to create a workflow path and get guided next steps
-  {{/if}}
   </output>
 
 </step>

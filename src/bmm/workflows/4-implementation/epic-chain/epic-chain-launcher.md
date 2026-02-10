@@ -86,17 +86,17 @@ If approved, provide the shell command:
 
 **Dry run (recommended first):**
 ```bash
-./.bmad/scripts/epic-chain.sh 36 37 38 --dry-run --verbose
+./_bmad/scripts/epic-chain.sh 36 37 38 --dry-run --verbose
 ```
 
 **Full execution:**
 ```bash
-./.bmad/scripts/epic-chain.sh 36 37 38
+./_bmad/scripts/epic-chain.sh 36 37 38
 ```
 
 **Resume from specific epic:**
 ```bash
-./.bmad/scripts/epic-chain.sh 36 37 38 --start-from 37
+./_bmad/scripts/epic-chain.sh 36 37 38 --start-from 37
 ```
 
 ### Step 6: Explain Execution Flow
@@ -130,4 +130,4 @@ This ensures each subsequent epic benefits from learnings without context window
 - **standard**: Full epic/story analysis, pattern detection, risk assessment
 - **thorough**: Deep code analysis, test coverage review, performance considerations
 
-Set via: `./.bmad/scripts/epic-chain.sh 36 37 38 --analysis thorough`
+Set via: `./_bmad/scripts/epic-chain.sh 36 37 38 --analysis thorough`

@@ -34,7 +34,17 @@ Your `docs/` folder should contain succinct, well-organized documentation that a
 
 For complex projects, consider using the `document-project` workflow. It offers runtime variants that will scan your entire project and document its actual current state.
 
-## Step 3: Get Help
+## Step 3: Generate Project Context
+
+Before implementation, create `project-context.md` so AI agents follow your codebase conventions:
+
+Run `generate-project-context` (`/bmad-bmm-generate-project-context`). This scans your codebase and creates a lean file with critical implementation rules — naming conventions, patterns, constraints, and anti-patterns.
+
+All implementation workflows (`/dev-story`, `/code-review`, `/quick-dev`, etc.) automatically load this file. Without it, AI agents may miss your project's established patterns.
+
+For comprehensive project documentation beyond implementation rules, use `document-project` (`/bmad-bmm-document-project`) instead.
+
+## Step 4: Get Help
 
 Get help to know what to do next based on your unique needs
 

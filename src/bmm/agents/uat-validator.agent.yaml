@@ -29,22 +29,11 @@ agent:
     - "Generate validation report with clear go/no-go recommendation"
     - "Find if this exists, if it does, always treat it as the bible I plan and execute against: `**/project-context.md`"
 
-  # Knowledge sources for test execution
-  conversational_knowledge:
-    - name: "uat-automation-patterns"
-      description: "Patterns for automating common UAT scenario types"
-      path: "{project-root}/_bmad/bmm/data/uat-automation-patterns.yaml"
-
   menu:
     # Primary: Execute UAT validation for a completed epic
     - trigger: UV or fuzzy match on uat-validate
       workflow: "{project-root}/_bmad/bmm/workflows/5-validation/uat-validate/workflow.yaml"
       description: "[UV] Execute UAT scenarios and validate epic against acceptance criteria (triggers self-healing on failure)"
-
-    # Review and summarize UAT results
-    - trigger: UR or fuzzy match on uat-report
-      exec: "{project-root}/_bmad/bmm/workflows/5-validation/uat-report/workflow.md"
-      description: "[UR] Generate UAT validation report with pass/fail summary and recommendations"
 
     # Quick validation - just check automatable scenarios
     - trigger: UQ or fuzzy match on uat-quick

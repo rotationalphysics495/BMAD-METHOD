@@ -1,7 +1,7 @@
 # Epic Chain - Analysis and Execution Instructions
 
-<critical>The workflow execution engine is governed by: {project-root}/.bmad/core/tasks/workflow.xml</critical>
-<critical>You MUST have already loaded and processed: {project-root}/.bmad/bmm/workflows/4-implementation/epic-chain/workflow.yaml</critical>
+<critical>The workflow execution engine is governed by: {project-root}/_bmad/core/tasks/workflow.xml</critical>
+<critical>You MUST have already loaded and processed: {project-root}/_bmad/bmm/workflows/4-implementation/epic-chain/workflow.yaml</critical>
 
 ## Overview
 
@@ -255,13 +255,13 @@ Provide commands:
 
 ```bash
 # Dry run (recommended first)
-./.bmad/scripts/epic-chain.sh {epic_ids} --dry-run --verbose
+./_bmad/scripts/epic-chain.sh {epic_ids} --dry-run --verbose
 
 # Full execution
-./.bmad/scripts/epic-chain.sh {epic_ids}
+./_bmad/scripts/epic-chain.sh {epic_ids}
 
 # With specific options
-./.bmad/scripts/epic-chain.sh {epic_ids} --skip-done --verbose
+./_bmad/scripts/epic-chain.sh {epic_ids} --skip-done --verbose
 ```
 
 <action>Explain what will happen:</action>
