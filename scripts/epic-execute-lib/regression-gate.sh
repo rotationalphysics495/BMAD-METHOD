@@ -31,16 +31,17 @@ extract_test_count() {
 
     # Method 1: Try JSON output first (most reliable)
     # Jest with --json, Vitest with --reporter=json
+    # Note: Use printf and redirect stderr to avoid broken pipe warnings when jq exits early
     if command -v jq >/dev/null 2>&1; then
         # Jest JSON format
-        count=$(echo "$test_output" | jq -r '.numPassedTests // empty' 2>/dev/null)
+        count=$(printf '%s' "$test_output" 2>/dev/null | jq -r '.numPassedTests // empty' 2>/dev/null) || true
         if [ -n "$count" ] && [ "$count" != "null" ] && [ "$count" -gt 0 ] 2>/dev/null; then
             echo "$count"
             return 0
         fi
 
         # Vitest JSON format (aggregate from testResults)
-        count=$(echo "$test_output" | jq -r '[.testResults[]?.assertionResults[]? | select(.status == "passed")] | length // empty' 2>/dev/null)
+        count=$(printf '%s' "$test_output" 2>/dev/null | jq -r '[.testResults[]?.assertionResults[]? | select(.status == "passed")] | length // empty' 2>/dev/null) || true
         if [ -n "$count" ] && [ "$count" != "null" ] && [ "$count" -gt 0 ] 2>/dev/null; then
             echo "$count"
             return 0

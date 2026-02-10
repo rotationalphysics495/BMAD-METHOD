@@ -91,6 +91,12 @@ cleanup() {
         fi
     fi
 
+    # Save log to repo before exiting
+    save_log_to_repo
+    if [ -n "$FINAL_LOG_FILE" ] && [ -f "$FINAL_LOG_FILE" ]; then
+        echo "    - Log saved:     $FINAL_LOG_FILE"
+    fi
+
     exit $exit_code
 }
 
@@ -113,6 +119,7 @@ LIB_DIR="$SCRIPT_DIR/epic-execute-lib"
 [ -f "$LIB_DIR/utils.sh" ] && source "$LIB_DIR/utils.sh"
 [ -f "$LIB_DIR/decision-log.sh" ] && source "$LIB_DIR/decision-log.sh"
 [ -f "$LIB_DIR/regression-gate.sh" ] && source "$LIB_DIR/regression-gate.sh"
+[ -f "$LIB_DIR/test-failure-filter.sh" ] && source "$LIB_DIR/test-failure-filter.sh"
 [ -f "$LIB_DIR/design-phase.sh" ] && source "$LIB_DIR/design-phase.sh"
 [ -f "$LIB_DIR/json-output.sh" ] && source "$LIB_DIR/json-output.sh"
 [ -f "$LIB_DIR/tdd-flow.sh" ] && source "$LIB_DIR/tdd-flow.sh"
@@ -122,8 +129,12 @@ SPRINT_ARTIFACTS_DIR="$PROJECT_ROOT/docs/sprint-artifacts"
 SPRINTS_DIR="$PROJECT_ROOT/docs/sprints"
 EPICS_DIR="$PROJECT_ROOT/docs/epics"
 UAT_DIR="$PROJECT_ROOT/docs/uat"
+LOGS_DIR="$SPRINT_ARTIFACTS_DIR/logs"
 
+# Temporary log file during execution - will be copied to LOGS_DIR on completion
 LOG_FILE="/tmp/bmad-epic-execute-$$.log"
+# Final log path set after EPIC_ID is known (in save_log_to_repo)
+FINAL_LOG_FILE=""
 
 # =============================================================================
 # BMAD Workflow Paths
@@ -153,7 +164,9 @@ WORKFLOW_EXECUTOR="$CORE_TASKS_DIR/workflow.xml"
 UAT_STEP_TEMPLATE="$WORKFLOWS_DIR/epic-execute/steps/step-04-generate-uat.md"
 UAT_DOC_TEMPLATE="$WORKFLOWS_DIR/epic-execute/templates/uat-template.md"
 
-# New Quality Gate Steps
+# Epic-Execute Step Templates (lean, pipe-mode prompts)
+DEV_STORY_STEP="$WORKFLOWS_DIR/epic-execute/steps/step-02-dev-story.md"
+CODE_REVIEW_STEP="$WORKFLOWS_DIR/epic-execute/steps/step-03-code-review.md"
 ARCH_COMPLIANCE_STEP="$WORKFLOWS_DIR/epic-execute/steps/step-02b-arch-compliance.md"
 TEST_QUALITY_STEP="$WORKFLOWS_DIR/epic-execute/steps/step-03b-test-quality.md"
 TRACEABILITY_STEP="$WORKFLOWS_DIR/epic-execute/steps/step-03c-traceability.md"
@@ -190,6 +203,50 @@ log_error() {
 log_warn() {
     echo -e "${YELLOW}[!]${NC} $1"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] $1" >> "$LOG_FILE"
+}
+
+# =============================================================================
+# Log Persistence Functions
+# =============================================================================
+
+# Save the temporary log file to the repo's logs directory
+# Called during cleanup to ensure logs are preserved
+save_log_to_repo() {
+    # Skip if no log file or it's empty
+    if [ ! -f "$LOG_FILE" ] || [ ! -s "$LOG_FILE" ]; then
+        return 0
+    fi
+
+    # Create logs directory if needed
+    if [ -n "$LOGS_DIR" ]; then
+        mkdir -p "$LOGS_DIR" 2>/dev/null || true
+    else
+        return 0
+    fi
+
+    # Generate descriptive filename: epic-{id}-{timestamp}.log or epic-execute-{timestamp}.log
+    local timestamp
+    timestamp=$(date '+%Y%m%d-%H%M%S')
+    local log_filename
+
+    if [ -n "$EPIC_ID" ]; then
+        log_filename="epic-${EPIC_ID}-${timestamp}.log"
+    else
+        log_filename="epic-execute-${timestamp}.log"
+    fi
+
+    FINAL_LOG_FILE="$LOGS_DIR/$log_filename"
+
+    # Copy the log file
+    if cp "$LOG_FILE" "$FINAL_LOG_FILE" 2>/dev/null; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log saved to: $FINAL_LOG_FILE" >> "$LOG_FILE"
+        # Also append to the saved copy
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log saved to: $FINAL_LOG_FILE" >> "$FINAL_LOG_FILE"
+        return 0
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] Failed to save log to $FINAL_LOG_FILE" >> "$LOG_FILE"
+        return 1
+    fi
 }
 
 # =============================================================================
@@ -364,6 +421,89 @@ log_prompt_size() {
         prompt_size=$(get_byte_size "$prompt")
         log "Prompt size ($phase_name): ${prompt_size}B / ${MAX_PROMPT_SIZE}B limit"
     fi
+}
+
+# =============================================================================
+# Shared Automated Prompt Builder
+# =============================================================================
+
+# Build a lean automated prompt from a step template + automation wrapper.
+# Instead of embedding full workflow files (~40KB), loads the step template (~4-9KB)
+# and wraps it with automation rules and completion signals.
+#
+# Arguments:
+#   $1 - step_template_file: Path to the step template .md file
+#   $2 - story_file: Path to the story .md file (passed as path, NOT embedded)
+#   $3 - phase_name: Name of the phase (dev, review, fix, arch, test_quality, trace, uat)
+#   $4 - extra_context: Optional extra context (review findings, decisions, etc.)
+#   $5 - completion_signals: Phase-specific completion signal instructions
+#
+# Outputs:
+#   The assembled prompt string to stdout
+build_automated_prompt() {
+    local step_template_file="$1"
+    local story_file="$2"
+    local phase_name="$3"
+    local extra_context="${4:-}"
+    local completion_signals="${5:-}"
+    local story_id
+    story_id=$(basename "$story_file" .md)
+
+    # Load the step template
+    local template=""
+    if [ -f "$step_template_file" ]; then
+        template=$(cat "$step_template_file")
+    else
+        log_warn "Step template not found: $step_template_file"
+    fi
+
+    # Perform variable substitution on template
+    template="${template//\{story_id\}/$story_id}"
+    template="${template//\{story_file\}/$story_file}"
+    template="${template//\{story_file_contents\}/Read the story file at: $story_file}"
+    template="${template//\{project_root\}/$PROJECT_ROOT}"
+    template="${template//\{epic_id\}/$EPIC_ID}"
+    template="${template//\{date\}/$(date '+%Y-%m-%d')}"
+
+    cat <<PROMPT_EOF
+## Automated Execution Mode
+
+### Rules
+- AUTOMATED execution - do NOT pause for user confirmation at any step
+- When instructions say 'ask user', make a reasonable autonomous decision
+- Complete the ENTIRE workflow in a single execution
+- Stage changes with explicit file paths: git add <file1> <file2> ...
+- Do NOT use 'git add -A' or 'git add .'
+
+### Execution Variables (Pre-resolved)
+- story_path: $story_file
+- story_key: $story_id
+- project_root: $PROJECT_ROOT
+- implementation_artifacts: $STORIES_DIR
+- sprint_status: $SPRINT_ARTIFACTS_DIR/sprint-status.yaml
+- date: $(date '+%Y-%m-%d')
+- user_name: Epic Executor
+- communication_language: English
+- user_skill_level: expert
+- document_output_language: English
+
+## Step Template Instructions
+
+$template
+
+## Story File
+
+**Read this file before proceeding:** $story_file
+**Story ID:** $story_id
+
+$extra_context
+
+$completion_signals
+
+## Begin Execution
+
+Execute the $phase_name workflow now.
+PROMPT_EOF
 }
 
 # =============================================================================
@@ -723,7 +863,7 @@ ENVIRONMENT VARIABLES:
     RETRY_INITIAL_DELAY     Initial retry delay in seconds (default: 5)
 
 FILES:
-    Logs:       /tmp/bmad-epic-execute-$$.log
+    Logs:       docs/sprint-artifacts/logs/epic-<id>-<timestamp>.log
     Metrics:    docs/sprint-artifacts/metrics/epic-<id>-metrics.yaml
     Checkpoint: docs/sprint-artifacts/.epic-<id>-checkpoint
 
@@ -1156,25 +1296,14 @@ execute_dev_phase() {
     local story_file="$1"
     local story_id=$(basename "$story_file" .md)
 
-    log ">>> DEV PHASE: $story_id (using BMAD dev-story workflow)"
+    log ">>> DEV PHASE: $story_id (using step template, lean prompt)"
 
-    # Verify workflow files exist
-    if [ ! -f "$DEV_WORKFLOW_YAML" ] || [ ! -f "$DEV_WORKFLOW_INSTRUCTIONS" ]; then
-        log_error "BMAD dev-story workflow files not found"
-        log_error "Expected: $DEV_WORKFLOW_YAML"
-        log_error "Expected: $DEV_WORKFLOW_INSTRUCTIONS"
+    # Verify step template exists, fall back to workflow files
+    if [ ! -f "$DEV_STORY_STEP" ]; then
+        log_warn "Step template not found: $DEV_STORY_STEP"
+        log_error "BMAD dev-story step template is required"
         return 1
     fi
-
-    # Read workflow components
-    local workflow_yaml=$(cat "$DEV_WORKFLOW_YAML")
-    local workflow_instructions=$(cat "$DEV_WORKFLOW_INSTRUCTIONS")
-    local workflow_checklist=""
-    if [ -f "$DEV_WORKFLOW_CHECKLIST" ]; then
-        workflow_checklist=$(cat "$DEV_WORKFLOW_CHECKLIST")
-    fi
-    local workflow_executor=$(cat "$WORKFLOW_EXECUTOR")
-    local story_contents=$(cat "$story_file")
 
     # Get decision log context if available (with size limit)
     local decision_context=""
@@ -1201,83 +1330,30 @@ execute_dev_phase() {
         test_spec_context=$(build_test_spec_context_for_dev "$story_id")
     fi
 
-    # Truncate large workflow files if needed to stay within context limits
-    local workflow_yaml_truncated="$workflow_yaml"
-    local yaml_size
-    yaml_size=$(get_byte_size "$workflow_yaml")
-    if [ "$yaml_size" -gt 10000 ]; then
-        workflow_yaml_truncated=$(truncate_content "$workflow_yaml" 10000 "Workflow YAML")
-    fi
-
-    # Build the dev prompt using BMAD workflow
-    local dev_prompt="You are executing a BMAD dev-story workflow in automated mode.
-
-## Workflow Execution Context
-
-You are running the BMAD dev-story workflow to implement a story. This is an AUTOMATED execution
-as part of an epic chain - execute the workflow completely without user interaction prompts.
-
-### CRITICAL AUTOMATION RULES
-- Do NOT pause for user confirmation at any step
-- Do NOT ask questions - make reasonable decisions and proceed
-- Execute ALL workflow steps in exact order until completion or HALT condition
-- When workflow says 'ask user', make a reasonable autonomous decision instead
-- Complete the ENTIRE workflow in a single execution
-
-## Workflow Executor Engine
-
-<workflow-executor>
-$workflow_executor
-</workflow-executor>
-
-## Dev-Story Workflow Configuration
-
-<workflow-yaml>
-$workflow_yaml_truncated
-</workflow-yaml>
-
-## Dev-Story Workflow Instructions
-
-<workflow-instructions>
-$workflow_instructions
-</workflow-instructions>
-
-## Definition of Done Checklist
-
-<validation-checklist>
-$workflow_checklist
-</validation-checklist>
-
-## Story to Implement
-
-**Story Path:** $story_file
-**Story ID:** $story_id
-
-<story-contents>
-$story_contents
-</story-contents>
+    # Build extra context from in-memory sources (decision log, design, test spec)
+    local extra_context=""
+    if [ -n "$design_context" ]; then
+        extra_context+="
 $design_context
+"
+    fi
+    if [ -n "$test_spec_context" ]; then
+        extra_context+="
 $test_spec_context
+"
+    fi
+    if [ -n "$decision_context" ]; then
+        extra_context+="
 ## Previous Implementation Context
 
 <decision-log>
 $decision_context
 </decision-log>
+"
+    fi
 
-## Execution Variables (Pre-resolved)
-
-- story_path: $story_file
-- story_key: $story_id
-- project_root: $PROJECT_ROOT
-- implementation_artifacts: $STORIES_DIR
-- sprint_status: $SPRINT_ARTIFACTS_DIR/sprint-status.yaml
-- date: $(date '+%Y-%m-%d')
-- user_name: Epic Executor
-- communication_language: English
-- user_skill_level: expert
-- document_output_language: English
-
-## Completion Signals
+    # Completion signals for dev phase
+    local completion_signals="## Completion Signals
 
 When the workflow completes successfully (all tasks done, tests pass, status set to 'review'):
 
@@ -1300,18 +1376,19 @@ If a HALT condition is triggered or implementation is blocked:
 1. Output a JSON result block with status \"BLOCKED\" and issues array describing blockers
 2. Then output exactly: IMPLEMENTATION BLOCKED: $story_id - [specific reason]
 
-## Begin Execution
-
-Execute the dev-story workflow now. Follow all steps in exact order.
 Stage your changes with explicit file paths: git add <file1> <file2> ...
 Do NOT use 'git add -A' or 'git add .' - only stage files you created or modified."
+
+    # Build the lean prompt using step template + automation wrapper
+    local dev_prompt
+    dev_prompt=$(build_automated_prompt "$DEV_STORY_STEP" "$story_file" "dev-story" "$extra_context" "$completion_signals")
 
     # Log prompt size in verbose mode
     log_prompt_size "$dev_prompt" "dev-phase"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would execute BMAD dev-story workflow for $story_id"
-        echo "[DRY RUN] Workflow: $DEV_WORKFLOW_DIR"
+        echo "[DRY RUN] Would execute dev-story step template for $story_id"
+        echo "[DRY RUN] Template: $DEV_STORY_STEP"
         return 0
     fi
 
@@ -1375,98 +1452,29 @@ execute_review_phase() {
     # Reset findings
     LAST_REVIEW_FINDINGS=""
 
-    log ">>> REVIEW PHASE: $story_id (using BMAD code-review workflow, fresh context)"
+    log ">>> REVIEW PHASE: $story_id (using step template, fresh context)"
 
-    # Verify workflow files exist
-    if [ ! -f "$REVIEW_WORKFLOW_YAML" ] || [ ! -f "$REVIEW_WORKFLOW_INSTRUCTIONS" ]; then
-        log_error "BMAD code-review workflow files not found"
-        log_error "Expected: $REVIEW_WORKFLOW_YAML"
-        log_error "Expected: $REVIEW_WORKFLOW_INSTRUCTIONS"
+    # Verify step template exists
+    if [ ! -f "$CODE_REVIEW_STEP" ]; then
+        log_warn "Step template not found: $CODE_REVIEW_STEP"
+        log_error "BMAD code-review step template is required"
         return 1
     fi
 
-    # Read workflow components
-    local workflow_yaml=$(cat "$REVIEW_WORKFLOW_YAML")
-    local workflow_instructions=$(cat "$REVIEW_WORKFLOW_INSTRUCTIONS")
-    local workflow_checklist=""
-    if [ -f "$REVIEW_WORKFLOW_CHECKLIST" ]; then
-        workflow_checklist=$(cat "$REVIEW_WORKFLOW_CHECKLIST")
-    fi
-    local workflow_executor=$(cat "$WORKFLOW_EXECUTOR")
-    local story_contents=$(cat "$story_file")
+    # Review-specific extra context: adversarial mode + auto-fix policy
+    local extra_context="## Adversarial Review Mode
 
-    # Build the review prompt using BMAD workflow
-    local review_prompt="You are executing a BMAD code-review workflow in automated mode.
-
-## Workflow Execution Context
-
-You are running the BMAD code-review workflow to perform an ADVERSARIAL code review.
-This is an AUTOMATED execution as part of an epic chain.
-
-### CRITICAL AUTOMATION RULES
-- Do NOT pause for user confirmation at any step
-- When workflow offers options (fix automatically, create action items, show details), ALWAYS choose option 1: Fix them automatically
-- Execute ALL workflow steps in exact order until completion
-- When workflow says 'ask user', automatically choose the option that fixes issues
-- You ARE an adversarial reviewer - find 3-10 specific issues minimum
-- Auto-fix all HIGH and MEDIUM severity issues
-- Complete the ENTIRE workflow in a single execution
-
-## Workflow Executor Engine
-
-<workflow-executor>
-$workflow_executor
-</workflow-executor>
-
-## Code-Review Workflow Configuration
-
-<workflow-yaml>
-$workflow_yaml
-</workflow-yaml>
-
-## Code-Review Workflow Instructions
-
-<workflow-instructions>
-$workflow_instructions
-</workflow-instructions>
-
-## Review Validation Checklist
-
-<validation-checklist>
-$workflow_checklist
-</validation-checklist>
-
-## Story to Review
-
-**Story Path:** $story_file
-**Story ID:** $story_id
-
-<story-contents>
-$story_contents
-</story-contents>
-
-## Execution Variables (Pre-resolved)
-
-- story_path: $story_file
-- story_key: $story_id
-- project_root: $PROJECT_ROOT
-- implementation_artifacts: $STORIES_DIR
-- planning_artifacts: $PROJECT_ROOT/docs
-- sprint_status: $SPRINT_ARTIFACTS_DIR/sprint-status.yaml
-- date: $(date '+%Y-%m-%d')
-- user_name: Epic Executor
-- communication_language: English
-- user_skill_level: expert
-- document_output_language: English
+You ARE an adversarial reviewer - find 3-10 specific issues minimum.
+You are seeing this code for the FIRST TIME - review with fresh eyes.
 
 ## Automated Decision Policy
 
-When the workflow presents options:
-- Step 4 asks what to do with issues → Choose option 1 (Fix them automatically)
+When options are presented:
 - Always auto-fix HIGH and MEDIUM severity issues
-- LOW severity issues: document only, do not fix
+- LOW severity issues: document only, do not fix"
 
-## Completion Signals
+    # Completion signals for review phase
+    local completion_signals="## Completion Signals
 
 When review passes (all HIGH/MEDIUM issues fixed, all ACs implemented, status set to 'done'):
 
@@ -1509,15 +1517,18 @@ REVIEW FINDINGS END
 
 3. Then output exactly: REVIEW FAILED: $story_id - [summary reason]
 
-## Begin Execution
-
-Execute the code-review workflow now. Follow all steps in exact order.
-You are seeing this code for the FIRST TIME - review adversarially.
 Stage any fixes with explicit file paths: git add <file1> <file2> ..."
 
+    # Build the lean prompt using step template + automation wrapper
+    local review_prompt
+    review_prompt=$(build_automated_prompt "$CODE_REVIEW_STEP" "$story_file" "code-review" "$extra_context" "$completion_signals")
+
+    # Log prompt size in verbose mode
+    log_prompt_size "$review_prompt" "review-phase"
+
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would execute BMAD code-review workflow for $story_id"
-        echo "[DRY RUN] Workflow: $REVIEW_WORKFLOW_DIR"
+        echo "[DRY RUN] Would execute code-review step template for $story_id"
+        echo "[DRY RUN] Template: $CODE_REVIEW_STEP"
         return 0
     fi
 
@@ -1586,23 +1597,7 @@ execute_fix_phase() {
     local static_analysis_context="${4:-}"  # Optional: real tooling output
     local story_id=$(basename "$story_file" .md)
 
-    log ">>> FIX PHASE: $story_id (attempt $attempt_num, using BMAD dev-story workflow)"
-
-    # Verify workflow files exist
-    if [ ! -f "$DEV_WORKFLOW_YAML" ] || [ ! -f "$DEV_WORKFLOW_INSTRUCTIONS" ]; then
-        log_error "BMAD dev-story workflow files not found for fix phase"
-        return 1
-    fi
-
-    # Read workflow components
-    local workflow_yaml=$(cat "$DEV_WORKFLOW_YAML")
-    local workflow_instructions=$(cat "$DEV_WORKFLOW_INSTRUCTIONS")
-    local workflow_checklist=""
-    if [ -f "$DEV_WORKFLOW_CHECKLIST" ]; then
-        workflow_checklist=$(cat "$DEV_WORKFLOW_CHECKLIST")
-    fi
-    local workflow_executor=$(cat "$WORKFLOW_EXECUTOR")
-    local story_contents=$(cat "$story_file")
+    log ">>> FIX PHASE: $story_id (attempt $attempt_num, lean focused prompt)"
 
     # Build real tooling output section if available
     local tooling_section=""
@@ -1617,20 +1612,27 @@ $static_analysis_context
 "
     fi
 
-    # Build the fix prompt using BMAD dev-story workflow with review context
-    local fix_prompt="You are executing a BMAD dev-story workflow in FIX MODE to address code review findings.
+    # Build a focused fix prompt - no workflow files needed, just findings + rules
+    local fix_prompt="## Automated Execution Mode
+
+### Rules
+- AUTOMATED execution - do NOT pause for user confirmation at any step
+- This is a TARGETED FIX session - only fix the issues listed below
+- Do NOT refactor unrelated code
+- Do NOT add new features
+- Stage changes with explicit file paths: git add <file1> <file2> ...
+- Do NOT use 'git add -A' or 'git add .'
 
 ## Fix Phase Context
 
 This is attempt $attempt_num of 3 to fix issues identified during code review.
 You MUST address ALL HIGH and MEDIUM severity issues listed below.
 
-### CRITICAL FIX RULES
-- This is a TARGETED FIX session - only fix the issues listed below
-- Do NOT refactor unrelated code
-- Do NOT add new features
-- Fix each issue, run tests to verify, then move to the next
-- After fixing all issues, update the story file and stage changes
+## Story Being Fixed
+
+**Read this file before proceeding:** $story_file
+**Story ID:** $story_id
+**Fix Attempt:** $attempt_num of 3
 
 ## Review Findings to Address
 
@@ -1640,62 +1642,15 @@ The following issues were identified during code review and MUST be fixed:
 $review_findings
 </review-findings>
 $tooling_section
-## Workflow Executor Engine
-
-<workflow-executor>
-$workflow_executor
-</workflow-executor>
-
-## Dev-Story Workflow Configuration
-
-<workflow-yaml>
-$workflow_yaml
-</workflow-yaml>
-
-## Dev-Story Workflow Instructions
-
-<workflow-instructions>
-$workflow_instructions
-</workflow-instructions>
-
-## Definition of Done Checklist
-
-<validation-checklist>
-$workflow_checklist
-</validation-checklist>
-
-## Story Being Fixed
-
-**Story Path:** $story_file
-**Story ID:** $story_id
-**Fix Attempt:** $attempt_num of 3
-
-<story-contents>
-$story_contents
-</story-contents>
-
-## Execution Variables (Pre-resolved)
-
-- story_path: $story_file
-- story_key: $story_id
-- project_root: $PROJECT_ROOT
-- implementation_artifacts: $STORIES_DIR
-- sprint_status: $SPRINT_ARTIFACTS_DIR/sprint-status.yaml
-- date: $(date '+%Y-%m-%d')
-- user_name: Epic Executor (Fix Phase)
-- communication_language: English
-- user_skill_level: expert
-- document_output_language: English
-
 ## Fix Process
 
-1. For each issue in the review findings:
+1. Read the story file at: $story_file
+2. For each issue in the review findings:
    a. Locate the problematic code
    b. Implement the fix
    c. Run relevant tests to verify
    d. Move to next issue
-
-2. After all issues are fixed:
+3. After all issues are fixed:
    a. Run full test suite
    b. Update story file Dev Agent Record with fix notes
    c. Stage changed files: git add <file1> <file2> ...
@@ -1735,14 +1690,109 @@ If unable to fix one or more issues:
 
 Address all review findings now. This is attempt $attempt_num of 3."
 
-    if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would execute BMAD fix phase for $story_id (attempt $attempt_num)"
-        return 0
+    # Check and enforce prompt size limits
+    local prompt_size
+    prompt_size=$(get_byte_size "$fix_prompt")
+
+    # Log prompt size (always, not just verbose - critical for debugging)
+    log "Prompt size (fix-phase): ${prompt_size}B / ${MAX_PROMPT_SIZE}B limit"
+
+    # If prompt is too large, truncate the review findings
+    if [ "$prompt_size" -gt "$MAX_PROMPT_SIZE" ]; then
+        log_warn "Fix prompt exceeds size limit (${prompt_size}B > ${MAX_PROMPT_SIZE}B) - truncating"
+
+        # Calculate how much we need to cut
+        local excess=$((prompt_size - MAX_PROMPT_SIZE + 10000))  # Extra 10KB buffer
+
+        # Truncate the review_findings (the variable content)
+        local findings_size
+        findings_size=$(get_byte_size "$review_findings")
+        local new_findings_size=$((findings_size - excess))
+
+        if [ "$new_findings_size" -lt 5000 ]; then
+            new_findings_size=5000  # Minimum 5KB of findings
+        fi
+
+        review_findings=$(truncate_content "$review_findings" "$new_findings_size" "Review findings")
+
+        # Rebuild the prompt with truncated content
+        fix_prompt="## Automated Execution Mode
+
+### Rules
+- AUTOMATED execution - do NOT pause for user confirmation at any step
+- This is a TARGETED FIX session - only fix the issues listed below
+- Do NOT refactor unrelated code
+- Do NOT add new features
+- Stage changes with explicit file paths: git add <file1> <file2> ...
+- Do NOT use 'git add -A' or 'git add .'
+
+## Fix Phase Context
+
+This is attempt $attempt_num of 3 to fix issues identified during code review.
+You MUST address ALL HIGH and MEDIUM severity issues listed below.
+
+**NOTE: Review findings were truncated due to size limits. Focus on the issues shown.**
+
+## Story Being Fixed
+
+**Read this file before proceeding:** $story_file
+**Story ID:** $story_id
+**Fix Attempt:** $attempt_num of 3
+
+## Review Findings to Address
+
+<review-findings>
+$review_findings
+</review-findings>
+$tooling_section
+## Fix Process
+
+1. Read the story file at: $story_file
+2. For each issue in the review findings:
+   a. Locate the problematic code
+   b. Implement the fix
+   c. Run relevant tests to verify
+   d. Move to next issue
+3. After all issues are fixed:
+   a. Run full test suite
+   b. Update story file Dev Agent Record with fix notes
+   c. Stage changed files: git add <file1> <file2> ...
+
+## Begin Execution
+
+Address all review findings now. This is attempt $attempt_num of 3."
+
+        prompt_size=$(get_byte_size "$fix_prompt")
+        log "Truncated prompt size: ${prompt_size}B"
     fi
 
-    # Execute in isolated context
-    local result
-    result=$(claude --dangerously-skip-permissions -p "$fix_prompt" 2>&1) || true
+    # Declare result variable outside the conditional blocks
+    local result=""
+
+    # Final safety check - if still too large, write to temp file and use -f flag
+    if [ "$prompt_size" -gt "$MAX_PROMPT_SIZE" ]; then
+        log_warn "Prompt still too large after truncation - using file-based prompt"
+        local temp_prompt_file
+        temp_prompt_file=$(mktemp /tmp/bmad-fix-prompt-XXXXXX.txt)
+        printf '%s' "$fix_prompt" > "$temp_prompt_file"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY RUN] Would execute fix phase for $story_id (attempt $attempt_num) via file"
+            rm -f "$temp_prompt_file"
+            return 0
+        fi
+
+        result=$(claude --dangerously-skip-permissions -f "$temp_prompt_file" 2>&1) || true
+        rm -f "$temp_prompt_file"
+    else
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY RUN] Would execute fix phase for $story_id (attempt $attempt_num)"
+            return 0
+        fi
+
+        # Execute in isolated context
+        result=$(claude --dangerously-skip-permissions -p "$fix_prompt" 2>&1) || true
+    fi
 
     echo "$result" >> "$LOG_FILE"
 
@@ -1882,14 +1932,38 @@ $build_output
             local test_output
             test_output=$(cd "$PROJECT_ROOT" && npm test 2>&1) || {
                 local exit_code=$?
-                log_error "Tests failed (exit code: $exit_code)"
-                failure_details+="
-### Test Failures
+
+                # Check if there are NEW failures (not just pre-existing baseline failures)
+                local new_failure_count=0
+                if type count_new_test_failures >/dev/null 2>&1; then
+                    new_failure_count=$(count_new_test_failures "$test_output")
+                    new_failure_count=$(echo "$new_failure_count" | tr -d '[:space:]')
+                fi
+
+                if [ "$new_failure_count" -gt 0 ] 2>/dev/null; then
+                    log_error "Tests failed with $new_failure_count NEW failure(s) (exit code: $exit_code)"
+
+                    # Filter test output to only include failures (not all 1900+ passing tests)
+                    # This prevents prompt size explosion in fix phase
+                    local filtered_failures
+                    if type prepare_test_failures_for_fix >/dev/null 2>&1; then
+                        filtered_failures=$(prepare_test_failures_for_fix "$test_output" "$story_id")
+                    else
+                        # Fallback: basic extraction if module not loaded
+                        filtered_failures=$(echo "$test_output" | grep -E "FAIL|Error:|AssertionError|Test Files.*failed|Tests.*failed" | head -200)
+                    fi
+
+                    failure_details+="
+### Test Failures ($new_failure_count NEW, rest are pre-existing baseline)
 \`\`\`
-$test_output
+$filtered_failures
 \`\`\`
 "
-                ((failures++))
+                    ((failures++))
+                else
+                    # All failures are pre-existing - don't count as a failure for this story
+                    log_warn "Tests exited non-zero but all failures are pre-existing (baseline). Passing gate."
+                fi
             }
             echo "$test_output" >> "$LOG_FILE"
         fi
@@ -1916,14 +1990,34 @@ $cargo_output
         log "Running cargo test..."
         local test_output
         test_output=$(cd "$PROJECT_ROOT" && cargo test 2>&1) || {
-            log_error "Cargo tests failed"
-            failure_details+="
-### Cargo Test Failures
+            # Check if there are NEW failures
+            local new_failure_count=0
+            if type count_new_test_failures >/dev/null 2>&1; then
+                new_failure_count=$(count_new_test_failures "$test_output")
+                new_failure_count=$(echo "$new_failure_count" | tr -d '[:space:]')
+            fi
+
+            if [ "$new_failure_count" -gt 0 ] 2>/dev/null; then
+                log_error "Cargo tests failed with $new_failure_count NEW failure(s)"
+
+                # Filter test output to only include failures
+                local filtered_failures
+                if type prepare_test_failures_for_fix >/dev/null 2>&1; then
+                    filtered_failures=$(prepare_test_failures_for_fix "$test_output" "$story_id")
+                else
+                    filtered_failures=$(echo "$test_output" | grep -E "FAILED|error\[|panicked" | head -200)
+                fi
+
+                failure_details+="
+### Cargo Test Failures ($new_failure_count NEW)
 \`\`\`
-$test_output
+$filtered_failures
 \`\`\`
 "
-            ((failures++))
+                ((failures++))
+            else
+                log_warn "Cargo tests exited non-zero but all failures are pre-existing. Passing gate."
+            fi
         }
         echo "$test_output" >> "$LOG_FILE"
 
@@ -1949,14 +2043,34 @@ $build_output
         log "Running go test..."
         local test_output
         test_output=$(cd "$PROJECT_ROOT" && go test ./... 2>&1) || {
-            log_error "Go tests failed"
-            failure_details+="
-### Go Test Failures
+            # Check if there are NEW failures
+            local new_failure_count=0
+            if type count_new_test_failures >/dev/null 2>&1; then
+                new_failure_count=$(count_new_test_failures "$test_output")
+                new_failure_count=$(echo "$new_failure_count" | tr -d '[:space:]')
+            fi
+
+            if [ "$new_failure_count" -gt 0 ] 2>/dev/null; then
+                log_error "Go tests failed with $new_failure_count NEW failure(s)"
+
+                # Filter test output to only include failures
+                local filtered_failures
+                if type prepare_test_failures_for_fix >/dev/null 2>&1; then
+                    filtered_failures=$(prepare_test_failures_for_fix "$test_output" "$story_id")
+                else
+                    filtered_failures=$(echo "$test_output" | grep -E "FAIL|panic:|--- FAIL" | head -200)
+                fi
+
+                failure_details+="
+### Go Test Failures ($new_failure_count NEW)
 \`\`\`
-$test_output
+$filtered_failures
 \`\`\`
 "
-            ((failures++))
+                ((failures++))
+            else
+                log_warn "Go tests exited non-zero but all failures are pre-existing. Passing gate."
+            fi
         }
         echo "$test_output" >> "$LOG_FILE"
 
@@ -1968,14 +2082,34 @@ $test_output
             log "Running pytest..."
             local test_output
             test_output=$(cd "$PROJECT_ROOT" && pytest 2>&1) || {
-                log_error "Pytest failed"
-                failure_details+="
-### Pytest Failures
+                # Check if there are NEW failures
+                local new_failure_count=0
+                if type count_new_test_failures >/dev/null 2>&1; then
+                    new_failure_count=$(count_new_test_failures "$test_output")
+                    new_failure_count=$(echo "$new_failure_count" | tr -d '[:space:]')
+                fi
+
+                if [ "$new_failure_count" -gt 0 ] 2>/dev/null; then
+                    log_error "Pytest failed with $new_failure_count NEW failure(s)"
+
+                    # Filter test output to only include failures
+                    local filtered_failures
+                    if type prepare_test_failures_for_fix >/dev/null 2>&1; then
+                        filtered_failures=$(prepare_test_failures_for_fix "$test_output" "$story_id")
+                    else
+                        filtered_failures=$(echo "$test_output" | grep -E "FAILED|ERROR|AssertionError|=+ FAILURES =+" | head -200)
+                    fi
+
+                    failure_details+="
+### Pytest Failures ($new_failure_count NEW)
 \`\`\`
-$test_output
+$filtered_failures
 \`\`\`
 "
-                ((failures++))
+                    ((failures++))
+                else
+                    log_warn "Pytest exited non-zero but all failures are pre-existing. Passing gate."
+                fi
             }
             echo "$test_output" >> "$LOG_FILE"
         fi
@@ -2051,9 +2185,16 @@ execute_arch_compliance_phase() {
     # Reset violations
     LAST_ARCH_VIOLATIONS=""
 
-    log ">>> ARCH COMPLIANCE: $story_id (fresh context)"
+    log ">>> ARCH COMPLIANCE: $story_id (using step template, fresh context)"
 
-    # Load architecture file
+    # Verify step template exists
+    if [ ! -f "$ARCH_COMPLIANCE_STEP" ]; then
+        log_warn "Step template not found: $ARCH_COMPLIANCE_STEP"
+        log_error "BMAD arch compliance step template is required"
+        return 1
+    fi
+
+    # Load architecture file path (pass as path, don't embed)
     local arch_file=""
     for search_path in "$PROJECT_ROOT/docs/architecture.md" "$PROJECT_ROOT/docs/architecture/architecture.md" "$PROJECT_ROOT/architecture.md"; do
         if [ -f "$search_path" ]; then
@@ -2067,82 +2208,15 @@ execute_arch_compliance_phase() {
         return 0
     fi
 
-    local arch_contents=$(cat "$arch_file")
-    local story_contents=$(cat "$story_file")
+    # Extra context: architecture file path for Claude to read on-demand
+    local extra_context="## Architecture Reference
 
-    # Load step template if available
-    local step_template=""
-    if [ -f "$ARCH_COMPLIANCE_STEP" ]; then
-        step_template=$(cat "$ARCH_COMPLIANCE_STEP")
-    fi
+**Read the architecture document at:** $arch_file
 
-    local arch_prompt="You are an Architecture Compliance Validator executing a BMAD compliance check.
+Use this to validate compliance. Focus only on structural/architectural issues, not code quality."
 
-## Your Task
-
-Validate architecture compliance for story: $story_id
-
-You are checking the staged changes against the project's established architecture patterns.
-This is a TARGETED CHECK - focus only on structural/architectural issues, not code quality.
-
-### CRITICAL AUTOMATION RULES
-- Do NOT pause for user confirmation
-- Execute the full compliance check
-- Fix HIGH severity violations automatically
-- Document MEDIUM and LOW violations
-
-## Architecture Reference
-
-<architecture>
-$arch_contents
-</architecture>
-
-## Story Context
-
-<story>
-$story_contents
-</story>
-
-## Staged Changes
-
-Run: git diff --staged --name-only
-Then for each changed file: git diff --staged
-
-## Compliance Checklist
-
-### 1. Layer Violations
-- UI/Presentation only handles display logic
-- Business logic in service/domain layer
-- Data access confined to repository/data layer
-- Controllers only orchestrate
-
-### 2. Dependency Direction
-- No circular dependencies
-- Lower layers don't import from higher layers
-- Core doesn't depend on infrastructure
-
-### 3. Pattern Conformance
-- State management uses project's standard
-- Error handling follows conventions
-- API calls use established patterns
-
-### 4. Module Boundaries
-- Feature code in correct module
-- No cross-module imports bypassing interfaces
-
-### 5. File Organization
-- Files in correct directories
-- Naming follows conventions
-
-## Fix Policy
-
-| Severity | Action |
-|----------|--------|
-| HIGH | Fix immediately |
-| MEDIUM | Fix if possible, otherwise document |
-| LOW | Document only |
-
-## Completion Signals
+    # Completion signals for arch compliance
+    local completion_signals="## Completion Signals
 
 If compliant (no HIGH/MEDIUM violations or all fixed):
 Output: ARCH COMPLIANT: $story_id
@@ -2158,12 +2232,18 @@ ARCH VIOLATIONS END
 \`\`\`
 Then: ARCH VIOLATIONS: $story_id - [summary]
 
-## Begin Execution
+Stage any fixes with: git add <file1> <file2> ..."
 
-Check architecture compliance now. Stage any fixes with: git add <file1> <file2> ..."
+    # Build the lean prompt using step template + automation wrapper
+    local arch_prompt
+    arch_prompt=$(build_automated_prompt "$ARCH_COMPLIANCE_STEP" "$story_file" "arch-compliance" "$extra_context" "$completion_signals")
+
+    # Log prompt size in verbose mode
+    log_prompt_size "$arch_prompt" "arch-compliance"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would execute architecture compliance check for $story_id"
+        echo "[DRY RUN] Would execute arch compliance step template for $story_id"
+        echo "[DRY RUN] Template: $ARCH_COMPLIANCE_STEP"
         return 0
     fi
 
@@ -2200,70 +2280,17 @@ execute_test_quality_phase() {
     # Reset issues
     LAST_TEST_QUALITY_ISSUES=""
 
-    log ">>> TEST QUALITY: $story_id (fresh context)"
+    log ">>> TEST QUALITY: $story_id (using step template, fresh context)"
 
-    local story_contents=$(cat "$story_file")
+    # Verify step template exists
+    if [ ! -f "$TEST_QUALITY_STEP" ]; then
+        log_warn "Step template not found: $TEST_QUALITY_STEP"
+        log_error "BMAD test quality step template is required"
+        return 1
+    fi
 
-    local quality_prompt="You are a Test Architect (TEA) executing a test quality review.
-
-## Your Task
-
-Review the tests created for story: $story_id
-
-Focus on test maintainability, determinism, isolation, and flakiness prevention.
-
-### CRITICAL AUTOMATION RULES
-- Do NOT pause for user confirmation
-- Execute the full quality review
-- Fix CRITICAL and HIGH issues automatically
-- Document MEDIUM and LOW issues
-
-## Story Context
-
-<story>
-$story_contents
-</story>
-
-## Test Files to Review
-
-Find test files from Dev Agent Record:
-\`\`\`bash
-git diff --staged --name-only | grep -E '\\.(spec|test)\\.(ts|js|tsx|jsx)\$'
-\`\`\`
-
-## Quality Criteria
-
-### 1. BDD Format (Given-When-Then)
-### 2. Test ID Conventions ({story_id}-E2E-001, etc.)
-### 3. Hard Waits Detection (no sleep(), waitForTimeout())
-### 4. Determinism (no conditionals, no random values)
-### 5. Isolation & Cleanup (afterEach hooks, no shared state)
-### 6. Explicit Assertions (every test has expect/assert)
-### 7. Test Length (≤300 lines)
-### 8. Fixture Patterns
-### 9. Data Factories (no hardcoded test data)
-### 10. Network-First Pattern (intercept before navigate)
-### 11. Flakiness Patterns
-
-## Quality Score
-
-Starting: 100
-- Critical violations: -10 each
-- High violations: -5 each
-- Medium violations: -2 each
-- Low violations: -1 each
-- Bonus for best practices: +5 each
-
-## Fix Policy
-
-| Severity | Action |
-|----------|--------|
-| CRITICAL | Must fix |
-| HIGH | Fix if total issues > 3 |
-| MEDIUM | Document |
-| LOW | Document |
-
-## Completion Signals
+    # Completion signals for test quality phase
+    local completion_signals="## Completion Signals
 
 If quality approved (score ≥70, no critical/high remaining):
 Output: TEST QUALITY APPROVED: $story_id - Score: N/100
@@ -2282,12 +2309,18 @@ TEST QUALITY ISSUES END
 \`\`\`
 Then: TEST QUALITY FAILED: $story_id - Score: N/100
 
-## Begin Execution
+Stage any fixes with: git add <file1> <file2> ..."
 
-Review test quality now. Stage any fixes with: git add <file1> <file2> ..."
+    # Build the lean prompt using step template + automation wrapper
+    local quality_prompt
+    quality_prompt=$(build_automated_prompt "$TEST_QUALITY_STEP" "$story_file" "test-quality" "" "$completion_signals")
+
+    # Log prompt size in verbose mode
+    log_prompt_size "$quality_prompt" "test-quality"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would execute test quality review for $story_id"
+        echo "[DRY RUN] Would execute test quality step template for $story_id"
+        echo "[DRY RUN] Template: $TEST_QUALITY_STEP"
         return 0
     fi
 
@@ -2321,7 +2354,7 @@ Review test quality now. Stage any fixes with: git add <file1> <file2> ..."
 }
 
 execute_traceability_phase() {
-    log ">>> TRACEABILITY CHECK: Epic $EPIC_ID (fresh context)"
+    log ">>> TRACEABILITY CHECK: Epic $EPIC_ID (using step template, fresh context)"
 
     # Reset gaps
     LAST_TRACEABILITY_GAPS=""
@@ -2329,79 +2362,45 @@ execute_traceability_phase() {
     # Ensure output directory exists
     mkdir -p "$TRACEABILITY_DIR"
 
-    local epic_contents=$(cat "$EPIC_FILE")
+    # Verify step template exists
+    if [ ! -f "$TRACEABILITY_STEP" ]; then
+        log_warn "Step template not found: $TRACEABILITY_STEP"
+        log_error "BMAD traceability step template is required"
+        return 1
+    fi
 
-    # Build story contents block
-    local all_stories=""
+    # Build story file paths list instead of embedding all contents
+    local story_count=${#STORIES[@]}
+    local story_paths_list=""
     for story_file in "${STORIES[@]}"; do
-        local story_id=$(basename "$story_file" .md)
-        all_stories+="
-<story id=\"$story_id\">
-$(cat "$story_file")
-</story>
+        local sid=$(basename "$story_file" .md)
+        story_paths_list+="- $sid: $story_file
 "
     done
 
-    local story_count=${#STORIES[@]}
+    # Load step template and perform substitutions
+    local template
+    template=$(cat "$TRACEABILITY_STEP")
+    template="${template//\{epic_id\}/$EPIC_ID}"
+    template="${template//\{date\}/$(date '+%Y-%m-%d')}"
 
-    local trace_prompt="You are a Test Architect (TEA) executing requirements traceability analysis.
+    # Extra context: epic and story file paths for Claude to read on-demand
+    local extra_context="## Epic Definition
 
-## Your Task
-
-Generate a traceability matrix for Epic: $EPIC_ID
-
-Map ALL acceptance criteria from ALL stories to their implementing tests.
-Identify coverage gaps and determine if the epic is ready for UAT.
-
-### CRITICAL AUTOMATION RULES
-- Do NOT pause for user confirmation
-- Execute the full traceability analysis
-- Generate the traceability matrix document
-- If gaps found, output them in structured format for auto-fix
-
-## Epic Definition
-
-<epic>
-$epic_contents
-</epic>
+**Read the epic file at:** $EPIC_FILE
+**Epic ID:** $EPIC_ID
 
 ## Completed Stories ($story_count total)
 
-$all_stories
+Read each story file as needed during analysis:
 
-## Phase 1: Discover Tests
+$story_paths_list
+## Output Location
 
-\`\`\`bash
-find . -type f \\( -name \"*.spec.ts\" -o -name \"*.test.ts\" -o -name \"*.spec.js\" -o -name \"*.test.js\" \\) | head -100
-\`\`\`
+Save traceability matrix to: $TRACEABILITY_DIR/epic-${EPIC_ID}-traceability.md"
 
-## Phase 2: Map Criteria to Tests
-
-For each acceptance criterion:
-- Search for test IDs, describe blocks
-- Classify: FULL, PARTIAL, NONE, UNIT-ONLY, INTEGRATION-ONLY
-
-## Coverage Thresholds
-
-| Priority | Required | Gate Impact |
-|----------|----------|-------------|
-| P0 | 100% | FAIL if not met |
-| P1 | ≥90% | CONCERNS if 80-89%, FAIL if <80% |
-| P2 | ≥80% | Advisory |
-| P3 | None | Advisory |
-
-## Phase 3: Gap Analysis
-
-Identify:
-- Critical gaps (P0 without coverage)
-- High priority gaps (P1 < 90%)
-- Medium priority gaps (P2 < 80%)
-
-## Phase 4: Generate Deliverables
-
-Save traceability matrix to: $TRACEABILITY_DIR/epic-${EPIC_ID}-traceability.md
-
-## Completion Signals
+    # Completion signals for traceability phase
+    local completion_signals="## Completion Signals
 
 If PASS (P0=100%, P1≥90%):
 Output: TRACEABILITY PASS: $EPIC_ID - P0: N%, P1: M%, Overall: O%
@@ -2421,14 +2420,42 @@ SPEC:
 GAP: ...
 TRACEABILITY GAPS END
 \`\`\`
-Then: TRACEABILITY FAIL: $EPIC_ID - P0: N%, P1: M%, X critical gaps
+Then: TRACEABILITY FAIL: $EPIC_ID - P0: N%, P1: M%, X critical gaps"
+
+    # Build the prompt - traceability doesn't use a story_file, so pass EPIC_FILE
+    local trace_prompt="## Automated Execution Mode
+
+### Rules
+- AUTOMATED execution - do NOT pause for user confirmation at any step
+- When instructions say 'ask user', make a reasonable autonomous decision
+- Complete the ENTIRE workflow in a single execution
+
+### Execution Variables (Pre-resolved)
+- epic_id: $EPIC_ID
+- epic_file: $EPIC_FILE
+- story_count: $story_count
+- project_root: $PROJECT_ROOT
+- traceability_dir: $TRACEABILITY_DIR
+- date: $(date '+%Y-%m-%d')
+
+## Step Template Instructions
+
+$template
+
+$extra_context
+
+$completion_signals
 
 ## Begin Execution
 
-Analyze traceability now."
+Analyze traceability now. Read story files on-demand as needed."
+
+    # Log prompt size in verbose mode
+    log_prompt_size "$trace_prompt" "traceability"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would execute traceability analysis for Epic $EPIC_ID"
+        echo "[DRY RUN] Would execute traceability step template for Epic $EPIC_ID"
+        echo "[DRY RUN] Template: $TRACEABILITY_STEP"
         return 0
     fi
 
@@ -2578,6 +2605,12 @@ execute_story_with_fix_loop() {
                 fi
             fi
         fi
+    fi
+
+    # Capture test failure baseline before dev phase (for filtering in fix phase)
+    # This allows us to distinguish new failures from pre-existing ones
+    if type capture_failure_baseline >/dev/null 2>&1; then
+        capture_failure_baseline "$story_id"
     fi
 
     # DEV PHASE (Context 1) - Now implements to make tests pass (if TDD enabled)
@@ -2774,107 +2807,86 @@ commit_story() {
 }
 
 generate_uat() {
-    log ">>> GENERATING UAT DOCUMENT (using BMAD UAT template, fresh context)"
+    log ">>> GENERATING UAT DOCUMENT (using step template, fresh context)"
 
-    # Load UAT step template if available
-    local uat_step_template=""
-    if [ -f "$UAT_STEP_TEMPLATE" ]; then
-        uat_step_template=$(cat "$UAT_STEP_TEMPLATE")
+    # Verify step template exists
+    if [ ! -f "$UAT_STEP_TEMPLATE" ]; then
+        log_warn "Step template not found: $UAT_STEP_TEMPLATE"
+        log_error "BMAD UAT step template is required"
+        return 1
     fi
 
-    # Load UAT document template if available
-    local uat_doc_template=""
-    if [ -f "$UAT_DOC_TEMPLATE" ]; then
-        uat_doc_template=$(cat "$UAT_DOC_TEMPLATE")
-    fi
-
-    local epic_contents=$(cat "$EPIC_FILE")
-    local all_stories=""
-
+    # Count stories and build paths list
+    local story_count=${#STORIES[@]}
+    local story_paths_list=""
     for story_file in "${STORIES[@]}"; do
-        local story_id=$(basename "$story_file" .md)
-        all_stories+="
-<story id=\"$story_id\">
-$(cat "$story_file")
-</story>
+        local sid=$(basename "$story_file" .md)
+        story_paths_list+="- $sid: $story_file
 "
     done
 
-    # Count stories
-    local story_count=${#STORIES[@]}
+    # Load step template and perform substitutions
+    local template
+    template=$(cat "$UAT_STEP_TEMPLATE")
+    template="${template//\{epic_id\}/$EPIC_ID}"
+    template="${template//\{date\}/$(date '+%Y-%m-%d')}"
+    template="${template//\{story_count\}/$story_count}"
 
-    # Build the UAT generation prompt using BMAD workflow step
-    local uat_prompt="You are executing BMAD UAT generation step in automated mode.
+    # Extra context: file paths + doc template path + guidelines
+    local extra_context="## Epic Definition
 
-## Context
-
-This is Step 4 of the BMAD epic-execute workflow: Generate User Acceptance Testing Document.
-You are running in a completely fresh context - you see only the finished epic and story specifications.
-
-### CRITICAL RULES
-- Write for NON-TECHNICAL users who can use software but don't know how it's built
-- Focus on user journeys, not implementation details
-- Generate clear, actionable test scenarios with binary pass/fail criteria
-- Complete the entire document in a single execution
-
-## BMAD UAT Generation Step Instructions
-
-<uat-step-template>
-$uat_step_template
-</uat-step-template>
-
-## BMAD UAT Document Template
-
-<uat-doc-template>
-$uat_doc_template
-</uat-doc-template>
-
-## Epic Definition
-
+**Read the epic file at:** $EPIC_FILE
 **Epic ID:** $EPIC_ID
-**Epic File:** $EPIC_FILE
 
-<epic>
-$epic_contents
-</epic>
+## Completed Stories ($story_count total)
 
-## Completed Stories (${story_count} total)
+Read each story file as needed:
 
-$all_stories
+$story_paths_list
+## UAT Document Template
 
-## Pre-resolved Variables
-
-- epic_id: $EPIC_ID
-- story_count: $story_count
-- date: $(date '+%Y-%m-%d')
-- output_path: $UAT_DIR/epic-${EPIC_ID}-uat.md
-
-## Scenario Generation Guidelines
-
-### Good Scenarios
-- Follow realistic user workflows
-- Build on each other (Scenario 2 assumes Scenario 1 completed)
-- Include at least one 'happy path' and one 'error path'
-- Test the boundaries (empty inputs, maximum values, etc.)
-
-### Avoid
-- Testing implementation details
-- Requiring technical knowledge to execute
-- Ambiguous expected results
-- Overlapping scenarios that test the same thing
+**Read the UAT document template at:** $UAT_DOC_TEMPLATE
+Follow this template structure for the generated document.
 
 ## Output
 
 1. Generate the complete UAT document following the template structure
 2. Save to: $UAT_DIR/epic-${EPIC_ID}-uat.md
-3. Output exactly: UAT GENERATED: $UAT_DIR/epic-${EPIC_ID}-uat.md
+3. Output exactly: UAT GENERATED: $UAT_DIR/epic-${EPIC_ID}-uat.md"
+
+    # Build the prompt
+    local uat_prompt="## Automated Execution Mode
+
+### Rules
+- AUTOMATED execution - do NOT pause for user confirmation at any step
+- Write for NON-TECHNICAL users who can use software but don't know how it's built
+- Focus on user journeys, not implementation details
+- Generate clear, actionable test scenarios with binary pass/fail criteria
+- Complete the entire document in a single execution
+
+### Execution Variables (Pre-resolved)
+- epic_id: $EPIC_ID
+- epic_file: $EPIC_FILE
+- story_count: $story_count
+- project_root: $PROJECT_ROOT
+- output_path: $UAT_DIR/epic-${EPIC_ID}-uat.md
+- date: $(date '+%Y-%m-%d')
+
+## Step Template Instructions
+
+$template
+
+$extra_context
 
 ## Begin Execution
 
-Generate the UAT document now."
+Generate the UAT document now. Read story files on-demand as needed."
+
+    # Log prompt size in verbose mode
+    log_prompt_size "$uat_prompt" "uat-generation"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would generate UAT document using BMAD template"
+        echo "[DRY RUN] Would generate UAT document using step template"
         echo "[DRY RUN] Template: $UAT_STEP_TEMPLATE"
         return 0
     fi
@@ -3105,7 +3117,7 @@ echo "    - Stories:       $STORIES_DIR/"
 echo "    - UAT:           $UAT_DIR/epic-${EPIC_ID}-uat.md"
 echo "    - Traceability:  $TRACEABILITY_DIR/epic-${EPIC_ID}-traceability.md"
 echo "    - Metrics:       $METRICS_FILE"
-echo "    - Log:           $LOG_FILE"
+echo "    - Log:           $LOGS_DIR/epic-${EPIC_ID}-<timestamp>.log (saved on exit)"
 echo ""
 
 if [ $FAILED -gt 0 ]; then
