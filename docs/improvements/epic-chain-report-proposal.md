@@ -1,3 +1,7 @@
+---
+title: "Epic Chain Execution Report Generator - Proposal"
+---
+
 # Epic Chain Execution Report Generator - Proposal
 
 ## Overview

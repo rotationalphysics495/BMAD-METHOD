@@ -1,3 +1,7 @@
+---
+title: UAT Validation Integration Architecture
+---
+
 # UAT Validation Integration Architecture
 
 ## Overview

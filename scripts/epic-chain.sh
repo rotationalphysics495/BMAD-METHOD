@@ -746,8 +746,8 @@ if [ "$GENERATE_REPORT" = true ] && [ "$DRY_RUN" = false ]; then
         WORKFLOW_PATH=""
         if [ -d "$BMAD_DIR/bmm/workflows/4-implementation/epic-chain" ]; then
             WORKFLOW_PATH="$BMAD_DIR/bmm/workflows/4-implementation/epic-chain"
-        elif [ -d "$PROJECT_ROOT/src/modules/bmm/workflows/4-implementation/epic-chain" ]; then
-            WORKFLOW_PATH="$PROJECT_ROOT/src/modules/bmm/workflows/4-implementation/epic-chain"
+        elif [ -d "$PROJECT_ROOT/src/bmm/workflows/4-implementation/epic-chain" ]; then
+            WORKFLOW_PATH="$PROJECT_ROOT/src/bmm/workflows/4-implementation/epic-chain"
         fi
 
         # Build report generation prompt

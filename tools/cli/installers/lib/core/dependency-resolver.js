@@ -1,8 +1,8 @@
 const fs = require('fs-extra');
 const path = require('node:path');
 const glob = require('glob');
-const chalk = require('chalk');
 const yaml = require('yaml');
+const prompts = require('../../../lib/prompts');
 
 /**
  * Dependency Resolver for BMAD modules
@@ -24,14 +24,14 @@ class DependencyResolver {
    */
   async resolve(bmadDir, selectedModules = [], options = {}) {
     if (options.verbose) {
-      console.log(chalk.cyan('Resolving module dependencies...'));
+      await prompts.log.info('Resolving module dependencies...');
     }
 
     // Always include core as base
     const modulesToProcess = new Set(['core', ...selectedModules]);
 
     // First pass: collect all explicitly selected files
-    const primaryFiles = await this.collectPrimaryFiles(bmadDir, modulesToProcess);
+    const primaryFiles = await this.collectPrimaryFiles(bmadDir, modulesToProcess, options);
 
     // Second pass: parse and resolve dependencies
     const allDependencies = await this.parseDependencies(primaryFiles);
@@ -50,7 +50,7 @@ class DependencyResolver {
 
     // Report results (only in verbose mode)
     if (options.verbose) {
-      this.reportResults(organizedFiles, selectedModules);
+      await this.reportResults(organizedFiles, selectedModules);
     }
 
     return {
@@ -66,25 +66,36 @@ class DependencyResolver {
   /**
    * Collect primary files from selected modules
    */
-  async collectPrimaryFiles(bmadDir, modules) {
+  async collectPrimaryFiles(bmadDir, modules, options = {}) {
     const files = [];
+    const { moduleManager } = options;
 
     for (const module of modules) {
+      // Skip external modules - they're installed from cache, not from source
+      if (moduleManager && (await moduleManager.isExternalModule(module))) {
+        continue;
+      }
+
       // Handle both source (src/) and installed (bmad/) directory structures
       let moduleDir;
 
       // Check if this is a source directory (has 'src' subdirectory)
       const srcDir = path.join(bmadDir, 'src');
       if (await fs.pathExists(srcDir)) {
-        // Source directory structure: src/core or src/modules/xxx
-        moduleDir = module === 'core' ? path.join(srcDir, 'core') : path.join(srcDir, 'modules', module);
-      } else {
-        // Installed directory structure: bmad/core or bmad/modules/xxx
-        moduleDir = module === 'core' ? path.join(bmadDir, 'core') : path.join(bmadDir, 'modules', module);
+        // Source directory structure: src/core or src/bmm
+        if (module === 'core') {
+          moduleDir = path.join(srcDir, 'core');
+        } else if (module === 'bmm') {
+          moduleDir = path.join(srcDir, 'bmm');
+        }
+      }
+
+      if (!moduleDir) {
+        continue;
       }
 
       if (!(await fs.pathExists(moduleDir))) {
-        console.warn(chalk.yellow(`Module directory not found: ${moduleDir}`));
+        await prompts.log.warn('Module directory not found: ' + moduleDir);
         continue;
       }
 
@@ -139,7 +150,7 @@ class DependencyResolver {
       const content = await fs.readFile(file.path, 'utf8');
 
       // Parse YAML frontmatter for explicit dependencies
-      const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+      const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
       if (frontmatterMatch) {
         try {
           // Pre-process to handle backticks in YAML values
@@ -172,7 +183,7 @@ class DependencyResolver {
             }
           }
         } catch (error) {
-          console.warn(chalk.yellow(`Failed to parse frontmatter in ${file.name}: ${error.message}`));
+          await prompts.log.warn('Failed to parse frontmatter in ' + file.name + ': ' + error.message);
         }
       }
 
@@ -391,7 +402,8 @@ class DependencyResolver {
 
         // Try to resolve as if it's in src structure
         // bmad/core/tasks/foo.md -> src/core/tasks/foo.md
-        // bmad/bmm/tasks/bar.md -> src/modules/bmm/tasks/bar.md
+        // bmad/bmm/tasks/bar.md -> src/bmm/tasks/bar.md (bmm is directly under src/)
+        // bmad/cis/agents/bar.md -> src/modules/cis/agents/bar.md
 
         if (bmadPath.startsWith('core/')) {
           const corePath = path.join(bmadDir, bmadPath);
@@ -405,7 +417,14 @@ class DependencyResolver {
           const parts = bmadPath.split('/');
           const module = parts[0];
           const rest = parts.slice(1).join('/');
-          const modulePath = path.join(bmadDir, 'modules', module, rest);
+          let modulePath;
+          if (module === 'bmm') {
+            // bmm is directly under src/
+            modulePath = path.join(bmadDir, module, rest);
+          } else {
+            // Other modules are under modules/
+            modulePath = path.join(bmadDir, 'modules', module, rest);
+          }
 
           if (await fs.pathExists(modulePath)) {
             paths.push(modulePath);
@@ -565,10 +584,12 @@ class DependencyResolver {
     const relative = path.relative(bmadDir, filePath);
     const parts = relative.split(path.sep);
 
-    // Handle source directory structure (src/core or src/modules/xxx)
+    // Handle source directory structure (src/core, src/bmm, or src/modules/xxx)
     if (parts[0] === 'src') {
       if (parts[1] === 'core') {
         return 'core';
+      } else if (parts[1] === 'bmm') {
+        return 'bmm';
       } else if (parts[1] === 'modules' && parts.length > 2) {
         return parts[2];
       }
@@ -610,27 +631,24 @@ class DependencyResolver {
       let moduleBase;
 
       // Check if file is in source directory structure
-      if (file.includes('/src/core/') || file.includes('/src/modules/')) {
-        moduleBase = module === 'core' ? path.join(bmadDir, 'src', 'core') : path.join(bmadDir, 'src', 'modules', module);
+      if (file.includes('/src/core/') || file.includes('/src/bmm/')) {
+        if (module === 'core') {
+          moduleBase = path.join(bmadDir, 'src', 'core');
+        } else if (module === 'bmm') {
+          moduleBase = path.join(bmadDir, 'src', 'bmm');
+        }
       } else {
-        // Installed structure
         moduleBase = module === 'core' ? path.join(bmadDir, 'core') : path.join(bmadDir, 'modules', module);
       }
 
       const relative = path.relative(moduleBase, file);
 
-      // Check file path for categorization
-      // Brain-tech files are data, not tasks (even though they're in tasks/brain-tech/)
-      if (file.includes('/brain-tech/')) {
-        organized[module].data.push(file);
-      } else if (relative.startsWith('agents/') || file.includes('/agents/')) {
+      if (relative.startsWith('agents/') || file.includes('/agents/')) {
         organized[module].agents.push(file);
       } else if (relative.startsWith('tasks/') || file.includes('/tasks/')) {
         organized[module].tasks.push(file);
       } else if (relative.startsWith('tools/') || file.includes('/tools/')) {
         organized[module].tools.push(file);
-      } else if (relative.includes('template') || file.includes('/templates/')) {
-        organized[module].templates.push(file);
       } else if (relative.includes('data/')) {
         organized[module].data.push(file);
       } else {
@@ -644,8 +662,8 @@ class DependencyResolver {
   /**
    * Report resolution results
    */
-  reportResults(organized, selectedModules) {
-    console.log(chalk.green('\n✓ Dependency resolution complete'));
+  async reportResults(organized, selectedModules) {
+    await prompts.log.success('Dependency resolution complete');
 
     for (const [module, files] of Object.entries(organized)) {
       const isSelected = selectedModules.includes(module) || module === 'core';
@@ -653,31 +671,31 @@ class DependencyResolver {
         files.agents.length + files.tasks.length + files.tools.length + files.templates.length + files.data.length + files.other.length;
 
       if (totalFiles > 0) {
-        console.log(chalk.cyan(`\n  ${module.toUpperCase()} module:`));
-        console.log(chalk.dim(`    Status: ${isSelected ? 'Selected' : 'Dependencies only'}`));
+        await prompts.log.info(`  ${module.toUpperCase()} module:`);
+        await prompts.log.message(`    Status: ${isSelected ? 'Selected' : 'Dependencies only'}`);
 
         if (files.agents.length > 0) {
-          console.log(chalk.dim(`    Agents: ${files.agents.length}`));
+          await prompts.log.message(`    Agents: ${files.agents.length}`);
         }
         if (files.tasks.length > 0) {
-          console.log(chalk.dim(`    Tasks: ${files.tasks.length}`));
+          await prompts.log.message(`    Tasks: ${files.tasks.length}`);
         }
         if (files.templates.length > 0) {
-          console.log(chalk.dim(`    Templates: ${files.templates.length}`));
+          await prompts.log.message(`    Templates: ${files.templates.length}`);
         }
         if (files.data.length > 0) {
-          console.log(chalk.dim(`    Data files: ${files.data.length}`));
+          await prompts.log.message(`    Data files: ${files.data.length}`);
         }
         if (files.other.length > 0) {
-          console.log(chalk.dim(`    Other files: ${files.other.length}`));
+          await prompts.log.message(`    Other files: ${files.other.length}`);
         }
       }
     }
 
     if (this.missingDependencies.size > 0) {
-      console.log(chalk.yellow('\n  ⚠ Missing dependencies:'));
+      await prompts.log.warn('Missing dependencies:');
       for (const missing of this.missingDependencies) {
-        console.log(chalk.yellow(`    - ${missing}`));
+        await prompts.log.warn(`    - ${missing}`);
       }
     }
   }

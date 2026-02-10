@@ -1,3 +1,7 @@
+---
+title: Party Mode Integration with Epic Execute
+---
+
 # Party Mode Integration with Epic Execute
 
 **Status**: Planning
@@ -17,7 +21,7 @@ This folder contains the complete documentation for integrating Party Mode's mul
 | [01-implementation-plan.md](./01-implementation-plan.md) | High-level implementation plan with CLI flags, configuration, and phases |
 | [02-context-management.md](./02-context-management.md) | Deep dive into context isolation architecture and data transfer mechanisms |
 | [03-file-modifications.md](./03-file-modifications.md) | Detailed specification of all file changes required |
-| [04-prompt-engineering.md](./04-prompt-engineering.md) | Prompt templates for each party phase (future) |
+| 04-prompt-engineering.md | Prompt templates for each party phase (future - not yet created) |
 
 ## Quick Links
 
@@ -123,8 +127,8 @@ This folder contains the complete documentation for integrating Party Mode's mul
 ## Related Documents
 
 - [Epic Workflows v1 Improvements](../epic-workflows-v1.md) - General workflow improvements
-- [Party Mode Core Docs](../../../src/core/workflows/party-mode/workflow.md) - Party Mode workflow definition
-- [Epic Execute Workflow](../../../src/modules/bmm/workflows/4-implementation/epic-execute/workflow.md) - Current workflow
+- Party Mode Core Docs: `src/core/workflows/party-mode/workflow.md`
+- Epic Execute Workflow: `src/modules/bmm/workflows/4-implementation/epic-execute/workflow.md`
 
 ---
 

@@ -1,3 +1,7 @@
+---
+title: BMAD Epic-Execute Improvements Analysis v2
+---
+
 # BMAD Epic-Execute Improvements Analysis v2
 
 **Date:** 2026-01-26

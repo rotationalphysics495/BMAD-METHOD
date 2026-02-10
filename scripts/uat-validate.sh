@@ -640,7 +640,7 @@ generate_fix_context() {
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
     # Find template
-    local template="$PROJECT_ROOT/src/modules/bmm/workflows/5-validation/uat-validate/uat-fix-context-template.md"
+    local template="$PROJECT_ROOT/src/bmm/workflows/5-validation/uat-validate/uat-fix-context-template.md"
 
     if [ -f "$template" ]; then
         # Render template with basic variable substitution

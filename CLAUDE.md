@@ -8,10 +8,7 @@ BMad Method is an AI-driven agile development framework built on BMad Core (Coll
 
 **Key Modules:**
 - **Core** (`src/core/`) - Universal framework with shared agents, tasks, and workflows
-- **BMM** (`src/modules/bmm/`) - BMad Method for agile software development (flagship module)
-- **BMB** (`src/modules/bmb/`) - BMad Builder for creating custom agents/workflows
-- **BMGD** (`src/modules/bmgd/`) - Game development workflows
-- **CIS** (`src/modules/cis/`) - Creative Intelligence Suite
+- **BMM** (`src/bmm/`) - BMad Method for agile software development (flagship module)
 
 ## Common Commands
 
@@ -41,7 +38,7 @@ npm run test:coverage         # Generate coverage report with c8
 ## Architecture
 
 ### Module Structure
-Each module in `src/modules/` follows this pattern:
+Each module in `src/` follows this pattern:
 ```
 module/
 ├── module.yaml           # Module configuration and installer prompts
@@ -55,7 +52,7 @@ module/
 ### Agent YAML Schema
 Agent files (`*.agent.yaml`) are validated by `tools/schema/agent.js` using Zod. Key rules:
 - Required fields: `id`, `name`, `title`, `icon`, `persona`, `menu`
-- Module agents must have `module` field matching their path (e.g., `bmm` for files in `src/modules/bmm/agents/`)
+- Module agents must have `module` field matching their path (e.g., `bmm` for files in `src/bmm/agents/`)
 - Menu triggers must be kebab-case or compound format (`TS or fuzzy match on tech-spec`)
 - Test fixtures in `test/fixtures/agent-schema/` demonstrate valid/invalid patterns
 
@@ -72,7 +69,7 @@ Workflows are YAML files that guide multi-step processes. Located in module `wor
 ## Development Notes
 
 ### Adding New Agents
-1. Create `*.agent.yaml` in appropriate `src/modules/*/agents/` directory
+1. Create `*.agent.yaml` in appropriate `src/*/agents/` directory
 2. Follow schema in `tools/schema/agent.js`
 3. Validate with `npm run validate:schemas`
 4. Add test fixtures if introducing new validation patterns

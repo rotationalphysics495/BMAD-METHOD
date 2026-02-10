@@ -1,3 +1,7 @@
+---
+title: "Implementation Plan: Party Mode Integration with Epic Execute"
+---
+
 # Implementation Plan: Party Mode Integration with Epic Execute
 
 ## Option B: Configurable Party Mode

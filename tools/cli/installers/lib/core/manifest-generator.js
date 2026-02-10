@@ -2,7 +2,9 @@ const path = require('node:path');
 const fs = require('fs-extra');
 const yaml = require('yaml');
 const crypto = require('node:crypto');
+const csv = require('csv-parse/sync');
 const { getSourcePath, getModulePath } = require('../../../lib/project-root');
+const prompts = require('../../../lib/prompts');
 
 // Load package.json for version info
 const packageJson = require('../../../../../package.json');
@@ -19,6 +21,19 @@ class ManifestGenerator {
     this.modules = [];
     this.files = [];
     this.selectedIdes = [];
+  }
+
+  /**
+   * Clean text for CSV output by normalizing whitespace and escaping quotes
+   * @param {string} text - Text to clean
+   * @returns {string} Cleaned text safe for CSV
+   */
+  cleanForCSV(text) {
+    if (!text) return '';
+    return text
+      .trim()
+      .replaceAll(/\s+/g, ' ') // Normalize all whitespace (including newlines) to single space
+      .replaceAll('"', '""'); // Escape quotes for CSV
   }
 
   /**
@@ -145,7 +160,11 @@ class ManifestGenerator {
           // Recurse into subdirectories
           const newRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
           await findWorkflows(fullPath, newRelativePath);
-        } else if (entry.name === 'workflow.yaml' || entry.name === 'workflow.md') {
+        } else if (
+          entry.name === 'workflow.yaml' ||
+          entry.name === 'workflow.md' ||
+          (entry.name.startsWith('workflow-') && entry.name.endsWith('.md'))
+        ) {
           // Parse workflow file (both YAML and MD formats)
           if (debug) {
             console.log(`[DEBUG] Found workflow file: ${fullPath}`);
@@ -161,7 +180,7 @@ class ManifestGenerator {
               workflow = yaml.parse(content);
             } else {
               // Parse MD workflow with YAML frontmatter
-              const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+              const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
               if (!frontmatterMatch) {
                 if (debug) {
                   console.log(`[DEBUG] Skipped (no frontmatter): ${fullPath}`);
@@ -183,6 +202,14 @@ class ManifestGenerator {
               continue;
             }
 
+            // Skip workflows marked as non-standalone (reference/example workflows)
+            if (workflow.standalone === false) {
+              if (debug) {
+                console.log(`[DEBUG] Skipped (standalone=false): ${workflow.name}`);
+              }
+              continue;
+            }
+
             if (workflow.name && workflow.description) {
               // Build relative path for installation
               const installPath =
@@ -190,10 +217,10 @@ class ManifestGenerator {
                   ? `${this.bmadFolderName}/core/workflows/${relativePath}/${entry.name}`
                   : `${this.bmadFolderName}/${moduleName}/workflows/${relativePath}/${entry.name}`;
 
-              // ALL workflows now generate commands - no standalone property needed
+              // Workflows with standalone: false are filtered out above
               workflows.push({
                 name: workflow.name,
-                description: workflow.description.replaceAll('"', '""'), // Escape quotes for CSV
+                description: this.cleanForCSV(workflow.description),
                 module: moduleName,
                 path: installPath,
               });
@@ -215,7 +242,7 @@ class ManifestGenerator {
               }
             }
           } catch (error) {
-            console.warn(`Warning: Failed to parse workflow at ${fullPath}: ${error.message}`);
+            await prompts.log.warn(`Failed to parse workflow at ${fullPath}: ${error.message}`);
           }
         }
       }
@@ -295,6 +322,7 @@ class ManifestGenerator {
         const nameMatch = content.match(/name="([^"]+)"/);
         const titleMatch = content.match(/title="([^"]+)"/);
         const iconMatch = content.match(/icon="([^"]+)"/);
+        const capabilitiesMatch = content.match(/capabilities="([^"]+)"/);
 
         // Extract persona fields
         const roleMatch = content.match(/<role>([^<]+)<\/role>/);
@@ -311,24 +339,16 @@ class ManifestGenerator {
 
         const agentName = entry.name.replace('.md', '');
 
-        // Helper function to clean and escape CSV content
-        const cleanForCSV = (text) => {
-          if (!text) return '';
-          return text
-            .trim()
-            .replaceAll(/\s+/g, ' ') // Normalize whitespace
-            .replaceAll('"', '""'); // Escape quotes for CSV
-        };
-
         agents.push({
           name: agentName,
           displayName: nameMatch ? nameMatch[1] : agentName,
           title: titleMatch ? titleMatch[1] : '',
           icon: iconMatch ? iconMatch[1] : '',
-          role: roleMatch ? cleanForCSV(roleMatch[1]) : '',
-          identity: identityMatch ? cleanForCSV(identityMatch[1]) : '',
-          communicationStyle: styleMatch ? cleanForCSV(styleMatch[1]) : '',
-          principles: principlesMatch ? cleanForCSV(principlesMatch[1]) : '',
+          capabilities: capabilitiesMatch ? this.cleanForCSV(capabilitiesMatch[1]) : '',
+          role: roleMatch ? this.cleanForCSV(roleMatch[1]) : '',
+          identity: identityMatch ? this.cleanForCSV(identityMatch[1]) : '',
+          communicationStyle: styleMatch ? this.cleanForCSV(styleMatch[1]) : '',
+          principles: principlesMatch ? this.cleanForCSV(principlesMatch[1]) : '',
           module: moduleName,
           path: installPath,
         });
@@ -377,27 +397,55 @@ class ManifestGenerator {
         const filePath = path.join(dirPath, file);
         const content = await fs.readFile(filePath, 'utf8');
 
-        // Extract task metadata from content if possible
-        const nameMatch = content.match(/name="([^"]+)"/);
+        // Skip internal/engine files (not user-facing tasks)
+        if (content.includes('internal="true"')) {
+          continue;
+        }
 
-        // Try description attribute first, fall back to <objective> element
-        const descMatch = content.match(/description="([^"]+)"/);
-        const objMatch = content.match(/<objective>([^<]+)<\/objective>/);
-        const description = descMatch ? descMatch[1] : objMatch ? objMatch[1].trim() : '';
+        let name = file.replace(/\.(xml|md)$/, '');
+        let displayName = name;
+        let description = '';
+        let standalone = false;
 
-        // Check for standalone attribute in <task> tag (default: false)
-        const standaloneMatch = content.match(/<task[^>]+standalone="true"/);
-        const standalone = !!standaloneMatch;
+        if (file.endsWith('.md')) {
+          // Parse YAML frontmatter for .md tasks
+          const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+          if (frontmatterMatch) {
+            try {
+              const frontmatter = yaml.parse(frontmatterMatch[1]);
+              name = frontmatter.name || name;
+              displayName = frontmatter.displayName || frontmatter.name || name;
+              description = this.cleanForCSV(frontmatter.description || '');
+              // Tasks are standalone by default unless explicitly false (internal=true is already filtered above)
+              standalone = frontmatter.standalone !== false && frontmatter.standalone !== 'false';
+            } catch {
+              // If YAML parsing fails, use defaults
+              standalone = true; // Default to standalone
+            }
+          } else {
+            standalone = true; // No frontmatter means standalone
+          }
+        } else {
+          // For .xml tasks, extract from tag attributes
+          const nameMatch = content.match(/name="([^"]+)"/);
+          displayName = nameMatch ? nameMatch[1] : name;
+
+          const descMatch = content.match(/description="([^"]+)"/);
+          const objMatch = content.match(/<objective>([^<]+)<\/objective>/);
+          description = this.cleanForCSV(descMatch ? descMatch[1] : objMatch ? objMatch[1].trim() : '');
+
+          const standaloneFalseMatch = content.match(/<task[^>]+standalone="false"/);
+          standalone = !standaloneFalseMatch;
+        }
 
         // Build relative path for installation
         const installPath =
           moduleName === 'core' ? `${this.bmadFolderName}/core/tasks/${file}` : `${this.bmadFolderName}/${moduleName}/tasks/${file}`;
 
-        const taskName = file.replace(/\.(xml|md)$/, '');
         tasks.push({
-          name: taskName,
-          displayName: nameMatch ? nameMatch[1] : taskName,
-          description: description.replaceAll('"', '""'),
+          name: name,
+          displayName: displayName,
+          description: description,
           module: moduleName,
           path: installPath,
           standalone: standalone,
@@ -406,7 +454,7 @@ class ManifestGenerator {
         // Add to files list
         this.files.push({
           type: 'task',
-          name: taskName,
+          name: name,
           module: moduleName,
           path: installPath,
         });
@@ -447,27 +495,55 @@ class ManifestGenerator {
         const filePath = path.join(dirPath, file);
         const content = await fs.readFile(filePath, 'utf8');
 
-        // Extract tool metadata from content if possible
-        const nameMatch = content.match(/name="([^"]+)"/);
+        // Skip internal tools (same as tasks)
+        if (content.includes('internal="true"')) {
+          continue;
+        }
 
-        // Try description attribute first, fall back to <objective> element
-        const descMatch = content.match(/description="([^"]+)"/);
-        const objMatch = content.match(/<objective>([^<]+)<\/objective>/);
-        const description = descMatch ? descMatch[1] : objMatch ? objMatch[1].trim() : '';
+        let name = file.replace(/\.(xml|md)$/, '');
+        let displayName = name;
+        let description = '';
+        let standalone = false;
 
-        // Check for standalone attribute in <tool> tag (default: false)
-        const standaloneMatch = content.match(/<tool[^>]+standalone="true"/);
-        const standalone = !!standaloneMatch;
+        if (file.endsWith('.md')) {
+          // Parse YAML frontmatter for .md tools
+          const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+          if (frontmatterMatch) {
+            try {
+              const frontmatter = yaml.parse(frontmatterMatch[1]);
+              name = frontmatter.name || name;
+              displayName = frontmatter.displayName || frontmatter.name || name;
+              description = this.cleanForCSV(frontmatter.description || '');
+              // Tools are standalone by default unless explicitly false (internal=true is already filtered above)
+              standalone = frontmatter.standalone !== false && frontmatter.standalone !== 'false';
+            } catch {
+              // If YAML parsing fails, use defaults
+              standalone = true; // Default to standalone
+            }
+          } else {
+            standalone = true; // No frontmatter means standalone
+          }
+        } else {
+          // For .xml tools, extract from tag attributes
+          const nameMatch = content.match(/name="([^"]+)"/);
+          displayName = nameMatch ? nameMatch[1] : name;
+
+          const descMatch = content.match(/description="([^"]+)"/);
+          const objMatch = content.match(/<objective>([^<]+)<\/objective>/);
+          description = this.cleanForCSV(descMatch ? descMatch[1] : objMatch ? objMatch[1].trim() : '');
+
+          const standaloneFalseMatch = content.match(/<tool[^>]+standalone="false"/);
+          standalone = !standaloneFalseMatch;
+        }
 
         // Build relative path for installation
         const installPath =
           moduleName === 'core' ? `${this.bmadFolderName}/core/tools/${file}` : `${this.bmadFolderName}/${moduleName}/tools/${file}`;
 
-        const toolName = file.replace(/\.(xml|md)$/, '');
         tools.push({
-          name: toolName,
-          displayName: nameMatch ? nameMatch[1] : toolName,
-          description: description.replaceAll('"', '""'),
+          name: name,
+          displayName: displayName,
+          description: description,
           module: moduleName,
           path: installPath,
           standalone: standalone,
@@ -476,7 +552,7 @@ class ManifestGenerator {
         // Add to files list
         this.files.push({
           type: 'tool',
-          name: toolName,
+          name: name,
           module: moduleName,
           path: installPath,
         });
@@ -488,18 +564,71 @@ class ManifestGenerator {
 
   /**
    * Write main manifest as YAML with installation info only
+   * Fetches fresh version info for all modules
    * @returns {string} Path to the manifest file
    */
   async writeMainManifest(cfgDir) {
     const manifestPath = path.join(cfgDir, 'manifest.yaml');
 
+    // Read existing manifest to preserve install date
+    let existingInstallDate = null;
+    const existingModulesMap = new Map();
+
+    if (await fs.pathExists(manifestPath)) {
+      try {
+        const existingContent = await fs.readFile(manifestPath, 'utf8');
+        const existingManifest = yaml.parse(existingContent);
+
+        // Preserve original install date
+        if (existingManifest.installation?.installDate) {
+          existingInstallDate = existingManifest.installation.installDate;
+        }
+
+        // Build map of existing modules for quick lookup
+        if (existingManifest.modules && Array.isArray(existingManifest.modules)) {
+          for (const m of existingManifest.modules) {
+            if (typeof m === 'object' && m.name) {
+              existingModulesMap.set(m.name, m);
+            } else if (typeof m === 'string') {
+              existingModulesMap.set(m, { installDate: existingInstallDate });
+            }
+          }
+        }
+      } catch {
+        // If we can't read existing manifest, continue with defaults
+      }
+    }
+
+    // Fetch fresh version info for all modules
+    const { Manifest } = require('./manifest');
+    const manifestObj = new Manifest();
+    const updatedModules = [];
+
+    for (const moduleName of this.modules) {
+      // Get fresh version info from source
+      const versionInfo = await manifestObj.getModuleVersionInfo(moduleName, this.bmadDir);
+
+      // Get existing install date if available
+      const existing = existingModulesMap.get(moduleName);
+
+      updatedModules.push({
+        name: moduleName,
+        version: versionInfo.version,
+        installDate: existing?.installDate || new Date().toISOString(),
+        lastUpdated: new Date().toISOString(),
+        source: versionInfo.source,
+        npmPackage: versionInfo.npmPackage,
+        repoUrl: versionInfo.repoUrl,
+      });
+    }
+
     const manifest = {
       installation: {
         version: packageJson.version,
-        installDate: new Date().toISOString(),
+        installDate: existingInstallDate || new Date().toISOString(),
         lastUpdated: new Date().toISOString(),
       },
-      modules: this.modules, // Include ALL modules (standard and custom)
+      modules: updatedModules,
       ides: this.selectedIdes,
     };
 
@@ -565,7 +694,7 @@ class ManifestGenerator {
 
       return preservedRows;
     } catch (error) {
-      console.warn(`Warning: Failed to read existing CSV ${csvPath}:`, error.message);
+      await prompts.log.warn(`Failed to read existing CSV ${csvPath}: ${error.message}`);
       return [];
     }
   }
@@ -607,47 +736,15 @@ class ManifestGenerator {
   async writeWorkflowManifest(cfgDir) {
     const csvPath = path.join(cfgDir, 'workflow-manifest.csv');
     const escapeCsv = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`;
-    const parseCsvLine = (line) => {
-      const columns = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || [];
-      return columns.map((c) => c.replaceAll(/^"|"$/g, ''));
-    };
-
-    // Read existing manifest to preserve entries
-    const existingEntries = new Map();
-    if (await fs.pathExists(csvPath)) {
-      const content = await fs.readFile(csvPath, 'utf8');
-      const lines = content.split('\n').filter((line) => line.trim());
-
-      // Skip header
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i];
-        if (line) {
-          const parts = parseCsvLine(line);
-          if (parts.length >= 4) {
-            const [name, description, module, workflowPath] = parts;
-            existingEntries.set(`${module}:${name}`, {
-              name,
-              description,
-              module,
-              path: workflowPath,
-            });
-          }
-        }
-      }
-    }
 
     // Create CSV header - standalone column removed, everything is canonicalized to 4 columns
     let csv = 'name,description,module,path\n';
 
-    // Combine existing and new workflows
+    // Build workflows map from discovered workflows only
+    // Old entries are NOT preserved - the manifest reflects what actually exists on disk
     const allWorkflows = new Map();
 
-    // Add existing entries
-    for (const [key, value] of existingEntries) {
-      allWorkflows.set(key, value);
-    }
-
-    // Add/update new workflows
+    // Only add workflows that were actually discovered in this scan
     for (const workflow of this.workflows) {
       const key = `${workflow.module}:${workflow.name}`;
       allWorkflows.set(key, {
@@ -674,30 +771,23 @@ class ManifestGenerator {
    */
   async writeAgentManifest(cfgDir) {
     const csvPath = path.join(cfgDir, 'agent-manifest.csv');
+    const escapeCsv = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`;
 
     // Read existing manifest to preserve entries
     const existingEntries = new Map();
     if (await fs.pathExists(csvPath)) {
       const content = await fs.readFile(csvPath, 'utf8');
-      const lines = content.split('\n').filter((line) => line.trim());
-
-      // Skip header
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i];
-        if (line) {
-          // Parse CSV (simple parsing assuming no commas in quoted fields)
-          const parts = line.split('","');
-          if (parts.length >= 11) {
-            const name = parts[0].replace(/^"/, '');
-            const module = parts[8];
-            existingEntries.set(`${module}:${name}`, line);
-          }
-        }
+      const records = csv.parse(content, {
+        columns: true,
+        skip_empty_lines: true,
+      });
+      for (const record of records) {
+        existingEntries.set(`${record.module}:${record.name}`, record);
       }
     }
 
     // Create CSV header with persona fields
-    let csv = 'name,displayName,title,icon,role,identity,communicationStyle,principles,module,path\n';
+    let csvContent = 'name,displayName,title,icon,capabilities,role,identity,communicationStyle,principles,module,path\n';
 
     // Combine existing and new agents, preferring new data for duplicates
     const allAgents = new Map();
@@ -710,18 +800,40 @@ class ManifestGenerator {
     // Add/update new agents
     for (const agent of this.agents) {
       const key = `${agent.module}:${agent.name}`;
-      allAgents.set(
-        key,
-        `"${agent.name}","${agent.displayName}","${agent.title}","${agent.icon}","${agent.role}","${agent.identity}","${agent.communicationStyle}","${agent.principles}","${agent.module}","${agent.path}"`,
-      );
+      allAgents.set(key, {
+        name: agent.name,
+        displayName: agent.displayName,
+        title: agent.title,
+        icon: agent.icon,
+        capabilities: agent.capabilities,
+        role: agent.role,
+        identity: agent.identity,
+        communicationStyle: agent.communicationStyle,
+        principles: agent.principles,
+        module: agent.module,
+        path: agent.path,
+      });
     }
 
     // Write all agents
-    for (const [, value] of allAgents) {
-      csv += value + '\n';
+    for (const [, record] of allAgents) {
+      const row = [
+        escapeCsv(record.name),
+        escapeCsv(record.displayName),
+        escapeCsv(record.title),
+        escapeCsv(record.icon),
+        escapeCsv(record.capabilities),
+        escapeCsv(record.role),
+        escapeCsv(record.identity),
+        escapeCsv(record.communicationStyle),
+        escapeCsv(record.principles),
+        escapeCsv(record.module),
+        escapeCsv(record.path),
+      ].join(',');
+      csvContent += row + '\n';
     }
 
-    await fs.writeFile(csvPath, csv);
+    await fs.writeFile(csvPath, csvContent);
     return csvPath;
   }
 
@@ -731,30 +843,23 @@ class ManifestGenerator {
    */
   async writeTaskManifest(cfgDir) {
     const csvPath = path.join(cfgDir, 'task-manifest.csv');
+    const escapeCsv = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`;
 
     // Read existing manifest to preserve entries
     const existingEntries = new Map();
     if (await fs.pathExists(csvPath)) {
       const content = await fs.readFile(csvPath, 'utf8');
-      const lines = content.split('\n').filter((line) => line.trim());
-
-      // Skip header
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i];
-        if (line) {
-          // Parse CSV (simple parsing assuming no commas in quoted fields)
-          const parts = line.split('","');
-          if (parts.length >= 6) {
-            const name = parts[0].replace(/^"/, '');
-            const module = parts[3];
-            existingEntries.set(`${module}:${name}`, line);
-          }
-        }
+      const records = csv.parse(content, {
+        columns: true,
+        skip_empty_lines: true,
+      });
+      for (const record of records) {
+        existingEntries.set(`${record.module}:${record.name}`, record);
       }
     }
 
     // Create CSV header with standalone column
-    let csv = 'name,displayName,description,module,path,standalone\n';
+    let csvContent = 'name,displayName,description,module,path,standalone\n';
 
     // Combine existing and new tasks
     const allTasks = new Map();
@@ -767,15 +872,30 @@ class ManifestGenerator {
     // Add/update new tasks
     for (const task of this.tasks) {
       const key = `${task.module}:${task.name}`;
-      allTasks.set(key, `"${task.name}","${task.displayName}","${task.description}","${task.module}","${task.path}","${task.standalone}"`);
+      allTasks.set(key, {
+        name: task.name,
+        displayName: task.displayName,
+        description: task.description,
+        module: task.module,
+        path: task.path,
+        standalone: task.standalone,
+      });
     }
 
     // Write all tasks
-    for (const [, value] of allTasks) {
-      csv += value + '\n';
+    for (const [, record] of allTasks) {
+      const row = [
+        escapeCsv(record.name),
+        escapeCsv(record.displayName),
+        escapeCsv(record.description),
+        escapeCsv(record.module),
+        escapeCsv(record.path),
+        escapeCsv(record.standalone),
+      ].join(',');
+      csvContent += row + '\n';
     }
 
-    await fs.writeFile(csvPath, csv);
+    await fs.writeFile(csvPath, csvContent);
     return csvPath;
   }
 
@@ -785,30 +905,23 @@ class ManifestGenerator {
    */
   async writeToolManifest(cfgDir) {
     const csvPath = path.join(cfgDir, 'tool-manifest.csv');
+    const escapeCsv = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`;
 
     // Read existing manifest to preserve entries
     const existingEntries = new Map();
     if (await fs.pathExists(csvPath)) {
       const content = await fs.readFile(csvPath, 'utf8');
-      const lines = content.split('\n').filter((line) => line.trim());
-
-      // Skip header
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i];
-        if (line) {
-          // Parse CSV (simple parsing assuming no commas in quoted fields)
-          const parts = line.split('","');
-          if (parts.length >= 6) {
-            const name = parts[0].replace(/^"/, '');
-            const module = parts[3];
-            existingEntries.set(`${module}:${name}`, line);
-          }
-        }
+      const records = csv.parse(content, {
+        columns: true,
+        skip_empty_lines: true,
+      });
+      for (const record of records) {
+        existingEntries.set(`${record.module}:${record.name}`, record);
       }
     }
 
     // Create CSV header with standalone column
-    let csv = 'name,displayName,description,module,path,standalone\n';
+    let csvContent = 'name,displayName,description,module,path,standalone\n';
 
     // Combine existing and new tools
     const allTools = new Map();
@@ -821,15 +934,30 @@ class ManifestGenerator {
     // Add/update new tools
     for (const tool of this.tools) {
       const key = `${tool.module}:${tool.name}`;
-      allTools.set(key, `"${tool.name}","${tool.displayName}","${tool.description}","${tool.module}","${tool.path}","${tool.standalone}"`);
+      allTools.set(key, {
+        name: tool.name,
+        displayName: tool.displayName,
+        description: tool.description,
+        module: tool.module,
+        path: tool.path,
+        standalone: tool.standalone,
+      });
     }
 
     // Write all tools
-    for (const [, value] of allTools) {
-      csv += value + '\n';
+    for (const [, record] of allTools) {
+      const row = [
+        escapeCsv(record.name),
+        escapeCsv(record.displayName),
+        escapeCsv(record.description),
+        escapeCsv(record.module),
+        escapeCsv(record.path),
+        escapeCsv(record.standalone),
+      ].join(',');
+      csvContent += row + '\n';
     }
 
-    await fs.writeFile(csvPath, csv);
+    await fs.writeFile(csvPath, csvContent);
     return csvPath;
   }
 
@@ -945,7 +1073,7 @@ class ManifestGenerator {
         }
       }
     } catch (error) {
-      console.warn(`Warning: Could not scan for installed modules: ${error.message}`);
+      await prompts.log.warn(`Could not scan for installed modules: ${error.message}`);
     }
 
     return modules;

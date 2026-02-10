@@ -270,8 +270,8 @@ echo "BMAD-METHOD not found - check installation"
 
 # Verify workflow files exist
 BMAD_PATH="<path-to-bmad-method>"
-ls -la "$BMAD_PATH/src/modules/bmm/workflows/4-implementation/dev-story/"
-ls -la "$BMAD_PATH/src/modules/bmm/workflows/4-implementation/code-review/"
+ls -la "$BMAD_PATH/src/bmm/workflows/4-implementation/dev-story/"
+ls -la "$BMAD_PATH/src/bmm/workflows/4-implementation/code-review/"
 ls -la "$BMAD_PATH/src/core/tasks/workflow.xml"
 
 # Verify your project has required directories

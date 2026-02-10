@@ -1,3 +1,7 @@
+---
+title: BMAD Epic-Execute v2 Fixes & Improvements
+---
+
 # BMAD Epic-Execute v2 Fixes & Improvements
 
 **Date:** 2026-01-26

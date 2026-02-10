@@ -6,9 +6,8 @@ on:
       - main
     paths:
       - "docs/**"
-      - "src/modules/*/docs/**"
       - "website/**"
-      - "tools/build-docs.js"
+      - "tools/build-docs.mjs"
       - ".github/workflows/docs.yaml"
   workflow_dispatch:
 
@@ -19,6 +18,7 @@ permissions:
 
 concurrency:
   group: "pages"
+  # No big win in setting this to true — risk of cancelling a deploy mid-flight.
   cancel-in-progress: false
 
 jobs:
@@ -28,31 +28,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          # Full history needed for Starlight's lastUpdated timestamps (git log)
           fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: ".nvmrc"
           cache: "npm"
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Determine site URL
-        id: site-url
-        run: |
-          if [ "${{ github.repository }}" = "bmad-code-org/BMAD-METHOD" ]; then
-            echo "url=https://bmad-code-org.github.io/BMAD-METHOD" >> $GITHUB_OUTPUT
-          else
-            OWNER="${{ github.repository_owner }}"
-            REPO="${{ github.event.repository.name }}"
-            echo "url=https://${OWNER}.github.io/${REPO}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Build documentation
         env:
-          SITE_URL: ${{ steps.site-url.outputs.url }}
+          # Override site URL from GitHub repo variable if set
+          # Otherwise, astro.config.mjs will compute from GITHUB_REPOSITORY
+          SITE_URL: ${{ vars.SITE_URL }}
         run: npm run docs:build
 
       - name: Upload artifact

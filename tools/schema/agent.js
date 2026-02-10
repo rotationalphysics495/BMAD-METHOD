@@ -210,7 +210,6 @@ function buildAgentSchema(expectedModule) {
       critical_actions: z.array(createNonEmptyString('agent.critical_actions[]')).optional(),
       menu: z.array(buildMenuItemSchema()).min(1, { message: 'agent.menu must include at least one entry' }),
       prompts: z.array(buildPromptSchema()).optional(),
-      webskip: z.boolean().optional(),
       discussion: z.boolean().optional(),
       conversational_knowledge: z.array(z.object({}).passthrough()).min(1).optional(),
     })
@@ -229,6 +228,7 @@ function buildMetadataSchema(expectedModule) {
     title: createNonEmptyString('agent.metadata.title'),
     icon: createNonEmptyString('agent.metadata.icon'),
     module: createNonEmptyString('agent.metadata.module').optional(),
+    capabilities: createNonEmptyString('agent.metadata.capabilities').optional(),
     hasSidecar: z.boolean(),
   };
 
@@ -454,7 +454,7 @@ function buildMenuItemSchema() {
 }
 
 /**
- * Derive the expected module slug from a file path residing under src/modules/<module>/agents/.
+ * Derive the expected module slug from a file path residing under src/<module>/agents/.
  * @param {string} filePath Absolute or relative agent path.
  * @returns {string|null} Module slug if identifiable, otherwise null.
  */
@@ -463,7 +463,7 @@ function deriveModuleFromPath(filePath) {
   assert(typeof filePath === 'string', 'validateAgentFile expects filePath to be a string');
   assert(filePath.startsWith('src/'), 'validateAgentFile expects filePath to start with "src/"');
 
-  const marker = 'src/modules/';
+  const marker = 'src/';
   if (!filePath.startsWith(marker)) {
     return null;
   }

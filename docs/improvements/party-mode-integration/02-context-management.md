@@ -1,3 +1,7 @@
+---
+title: Context Management Deep Dive
+---
+
 # Context Management Deep Dive
 
 **Document**: 02-context-management.md

@@ -1,3 +1,7 @@
+---
+title: Epic Workflows Improvement Plan v1
+---
+
 # Epic Workflows Improvement Plan v1
 
 **Date:** 2026-01-02
