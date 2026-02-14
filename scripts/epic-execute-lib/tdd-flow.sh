@@ -169,7 +169,7 @@ After outputting the spec block:
     fi
 
     local result
-    result=$(claude --dangerously-skip-permissions -p "$spec_prompt" 2>&1) || true
+    result=$(env -u CLAUDECODE claude --dangerously-skip-permissions -p "$spec_prompt" 2>&1) || true
 
     echo "$result" >> "$LOG_FILE"
 
@@ -315,7 +315,7 @@ After implementing the tests:
     fi
 
     local result
-    result=$(claude --dangerously-skip-permissions -p "$impl_prompt" 2>&1) || true
+    result=$(env -u CLAUDECODE claude --dangerously-skip-permissions -p "$impl_prompt" 2>&1) || true
 
     echo "$result" >> "$LOG_FILE"
 

@@ -143,7 +143,7 @@ DESIGN COMPLETE: $story_id"
     fi
 
     local result
-    result=$(claude --dangerously-skip-permissions -p "$design_prompt" 2>&1) || true
+    result=$(env -u CLAUDECODE claude --dangerously-skip-permissions -p "$design_prompt" 2>&1) || true
 
     echo "$result" >> "$LOG_FILE"
 

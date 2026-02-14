@@ -803,7 +803,7 @@ REPORT_GENERATED: $CHAIN_REPORT_FILE"
         log "Invoking report generator..."
 
         # Execute report generation
-        report_result=$(claude --dangerously-skip-permissions -p "$report_prompt" 2>&1) || true
+        report_result=$(env -u CLAUDECODE claude --dangerously-skip-permissions -p "$report_prompt" 2>&1) || true
 
         echo "$report_result" >> "$LOG_FILE"
 

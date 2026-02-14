@@ -859,7 +859,7 @@ HUMAN_ACTION_NEEDED: {yes/no}"
 
     # Execute in isolated context
     local result
-    result=$(claude --dangerously-skip-permissions -p "$fix_prompt" 2>&1) || true
+    result=$(env -u CLAUDECODE claude --dangerously-skip-permissions -p "$fix_prompt" 2>&1) || true
 
     echo "$result" >> "$LOG_FILE"
 
