@@ -10,8 +10,7 @@ communication_language: "{config_source}:communication_language"
 date: system-generated
 planning_artifacts: "{config_source}:planning_artifacts"
 implementation_artifacts: "{config_source}:implementation_artifacts"
-sprint_artifacts: "{config_source}:sprint_artifacts"
-output_folder: "{sprint_artifacts}"
+output_folder: "{implementation_artifacts}"
 
 # Workflow components
 installed_path: "{project-root}/_bmad/bmm/workflows/5-validation/uat-validate"
@@ -32,11 +31,11 @@ variables:
   stories_location: "{implementation_artifacts}"
 
   # Metrics output
-  metrics_folder: "{sprint_artifacts}/metrics"
+  metrics_folder: "{implementation_artifacts}/metrics"
   metrics_file: "{metrics_folder}/epic-{epic_id}-metrics.yaml"
 
   # Fix context output (for self-healing loop)
-  fix_context_file: "{sprint_artifacts}/uat-fix-context-{epic_id}-{attempt}.md"
+  fix_context_file: "{implementation_artifacts}/uat-fix-context-{epic_id}-{attempt}.md"
 
   # Gate configuration
   gate_mode: "quick" # quick | full | skip

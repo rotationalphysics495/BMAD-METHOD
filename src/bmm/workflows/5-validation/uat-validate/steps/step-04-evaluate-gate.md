@@ -47,7 +47,7 @@ if self_heal_enabled == false:
 
 Create fix context document at:
 ```
-{sprint_artifacts}/uat-fixes/epic-{epic_id}-fix-context-{attempt}.md
+{implementation_artifacts}/uat-fixes/epic-{epic_id}-fix-context-{attempt}.md
 ```
 
 #### 4.3.1 Load Template

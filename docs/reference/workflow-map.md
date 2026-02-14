@@ -97,3 +97,15 @@ All implementation workflows load `project-context.md` if it exists. Additional 
 | `code-review`  | architecture, story file     |
 | `quick-spec`   | planning docs (if exist)     |
 | `quick-dev`    | tech-spec                    |
+
+### Artifact Locations
+
+The installer creates three output areas. All paths are configurable during installation.
+
+| Folder | Default Path | Contains | Version Control |
+| ------ | ------------ | -------- | --------------- |
+| **Planning Artifacts** | `_bmad-output/planning-artifacts/` | PRDs, architecture docs, UX specs, epics | Gitignored (copy to `docs/` when finalized) |
+| **Implementation Artifacts** | `_bmad-output/implementation-artifacts/` | Sprint status, stories, reviews, retrospectives | Gitignored |
+| **Project Knowledge** | `docs/` | Research, project documentation, finalized references | Committed |
+
+Both `_bmad/` (configuration) and `_bmad-output/` (artifacts) are added to `.gitignore` by default. Long-term project knowledge goes in `docs/`, which is version-controlled.

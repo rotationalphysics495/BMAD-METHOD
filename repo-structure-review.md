@@ -41,46 +41,34 @@ The repo already had a comprehensive file reference validator (`tools/validate-f
 
 ---
 
-## 3. HIGH: `project-context.md` Is a Hidden Prerequisite
+## 3. ~~HIGH: `project-context.md` Is a Hidden Prerequisite~~ RESOLVED
 
-Every Phase 4 implementation workflow declares:
+**Status:** Fixed.
 
-```yaml
-project_context: "**/project-context.md"
-```
+`project-context.md` is now surfaced as a recommended step across all user-facing documentation:
 
-But there's no clear documentation on what this file is, when to create it, or how. The `generate-project-context` workflow exists but:
-
-- It's not mentioned in the Quick Start path in the README
-- The Getting Started tutorial doesn't flag it as a prerequisite before Phase 4
-- The Quick Flow path (`/quick-spec` → `/dev-story` → `/code-review`) doesn't mention it either
-
-**Impact:** Developers hit Phase 4 workflows and get confusing results because the project context file doesn't exist yet.
-
-**Recommendation:** Either auto-generate `project-context.md` during installation (even a minimal scaffold), or add a prominent step in the README's workflow paths and in the Quick Flow docs. Alternatively, make it optional in workflow configs with a graceful fallback.
+- **README.md** — Added a tip after Quick Flow's 3-command list for existing codebases, and inserted `/generate-project-context` as step 6 in the Full Planning Path before the build cycle
+- **Getting Started tutorial** — Added a "Project Context (Recommended for Existing Codebases)" subsection between Phase 3 and the build step, with Analyst agent instructions. Also added `generate-project-context` to the Quick Reference table
+- **Established Projects guide** — Inserted a new Step 3: "Generate Project Context" explaining both `generate-project-context` (lean rules) and `document-project` (comprehensive docs) options
+- **Workflow Map** — Replaced the dense Context Management paragraph with a scannable "Creating Project Context" sub-heading and a comparison table of both workflows
 
 ---
 
-## 4. HIGH: Artifact Storage Strategy Is Confusing
+## 4. ~~HIGH: Artifact Storage Strategy Is Confusing~~ RESOLVED
 
-Three layers of configuration overlap:
+**Status:** Fixed.
 
-- `core/module.yaml` defines `output_folder` (default: `_bmad-output`)
-- `bmm/module.yaml` defines `planning_artifacts`, `implementation_artifacts`, `project_knowledge` (nested under output_folder)
-- Individual workflows use different variable names (`{sprint_status}`, `{sprint_artifacts}`, `{output_folder}`)
-- `.gitignore` ignores both `_bmad/` and `_bmad-output/`
+Two sub-problems were addressed:
 
-**The confusion for real projects:**
+**A) Orphaned `sprint_artifacts` variable (code fix):**
+- `sprint_artifacts` was referenced in `epic-chain/workflow.yaml`, `uat-validate/workflow.yaml`, and 3 supporting markdown files but was never defined in any `module.yaml` — causing those workflows to break at runtime
+- All references replaced with `implementation_artifacts`, which is properly defined in `bmm/module.yaml` and serves the same purpose
 
-1. Are artifacts meant to be version-controlled? The `.gitignore` says no, but `project_knowledge` defaults to `docs/` which *is* typically committed.
-2. Some workflows reference `sprint_artifacts` which isn't defined in any `module.yaml` config.
-3. A developer doesn't know where to look for generated PRDs, architecture docs, or sprint tracking files.
+**B) Documentation gap (folder strategy):**
+- **Getting Started tutorial** — Expanded the installation section to explain all three output areas (`_bmad/`, `_bmad-output/`, `docs/`), their purposes, and version control strategy
+- **Workflow Map** — Added an "Artifact Locations" reference table showing default paths, contents, and version control guidance for each folder category
 
-**Recommendation:**
-
-- Add a clear section in the README or a post-install message explaining the folder structure and which folders to commit
-- Standardize variable names across all workflows (audit `sprint_artifacts` vs `sprint_status`)
-- Consider generating a `_bmad-output/README.md` during installation that explains the folder layout
+**Remaining (out of scope):** The `epic-execute/` workflow has hardcoded `docs/` paths in its own config system (`default-config.yaml`) rather than using module variables — this is a separate issue
 
 ---
 
@@ -108,20 +96,21 @@ Some workflows have both a `workflow.yaml` and a separate `instructions.md`, whi
 
 ---
 
-## 7. MEDIUM: No Example Project or Post-Install Scaffold
+## 7. ~~MEDIUM: No Example Project or Post-Install Scaffold~~ PARTIALLY RESOLVED
 
-After running `npx bmad-method install`, developers get agents and workflows but no example of what a successful project looks like. There's no:
+**Status:** Documentation improvements applied. Installer code enhancements remain as a future improvement.
 
-- Example `project-context.md`
-- Sample PRD or architecture doc showing expected output format
-- Starter `.claude/commands/` or equivalent showing what commands were generated
-- Post-install "what to do next" guide in the terminal
+**What was done:**
 
-**Recommendation:** Consider adding:
+- **README.md** — Improved the post-install section to explain what folders were created (`_bmad/`, `_bmad-output/`) and direct users to `/bmad-help`
+- **Getting Started tutorial** — Fixed the project folder tree to show the actual subfolder structure (`planning-artifacts/`, `implementation-artifacts/`, `docs/`) instead of a flat layout. Added a "How do I verify my installation?" FAQ entry
 
-- A `_bmad-output/GETTING-STARTED.md` generated at install time with next steps specific to the chosen modules/IDE
-- Example outputs in the docs site showing what a completed PRD, architecture doc, or sprint plan looks like
-- A `bmad status` CLI command that shows what phase the project is in and what the next recommended workflow is (the `status` command exists but appears minimal)
+**Remaining (future enhancements):**
+
+- Generate a `_bmad-output/GETTING-STARTED.md` at install time with module-specific next steps
+- Enhance installer `renderInstallSummary()` with module-aware guidance
+- Add sample PRD, architecture, and project-context outputs to the docs site
+- Enhance `bmad status` to show project phase and recommend next workflow
 
 ---
 
@@ -163,6 +152,6 @@ The contribution workflow likely references `npm run validate:refs` which doesn'
 |----------|------------|-------------|
 | ~~**1**~~ | ~~Consolidate `src/bmm/` and `src/modules/bmm/`~~ | **RESOLVED** |
 | ~~**2**~~ | ~~Add file reference validation to CI pipeline~~ | **RESOLVED** |
-| **3** | Document and scaffold `project-context.md` in onboarding flow | Unblocks Phase 4 workflows for new users |
-| **4** | Standardize artifact folder strategy with clear commit guidance | Developers understand where outputs go and what to version control |
-| **5** | Add post-install guidance with example outputs | Reduces time-to-first-workflow from "confused" to "productive" |
+| ~~**3**~~ | ~~Document and scaffold `project-context.md` in onboarding flow~~ | **RESOLVED** |
+| ~~**4**~~ | ~~Standardize artifact folder strategy with clear commit guidance~~ | **RESOLVED** |
+| ~~**5**~~ | ~~Add post-install guidance with example outputs~~ | **PARTIALLY RESOLVED** (docs improved; installer enhancements remain) |

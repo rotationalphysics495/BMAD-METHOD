@@ -195,7 +195,7 @@ Replace all `{variable}` placeholders with calculated values.
 
 Write rendered report to: `{chain_report_file}`
 
-Default: `{sprint_artifacts}/chain-execution-report.md`
+Default: `{implementation_artifacts}/chain-execution-report.md`
 
 ## Outputs
 

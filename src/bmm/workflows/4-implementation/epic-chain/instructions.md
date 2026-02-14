@@ -340,7 +340,7 @@ This step:
 
 **Trigger manually:** `*chain-report` or `*CR`
 
-**Output:** `{sprint_artifacts}/chain-execution-report.md`
+**Output:** `{implementation_artifacts}/chain-execution-report.md`
 </step>
 
 ## Metrics Collection

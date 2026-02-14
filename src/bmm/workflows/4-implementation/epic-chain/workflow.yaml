@@ -8,7 +8,7 @@ output_folder: "{config_source}:output_folder"
 user_name: "{config_source}:user_name"
 communication_language: "{config_source}:communication_language"
 date: system-generated
-sprint_artifacts: "{config_source}:sprint_artifacts"
+implementation_artifacts: "{config_source}:implementation_artifacts"
 
 # Workflow components
 installed_path: "{project-root}/_bmad/bmm/workflows/4-implementation/epic-chain"
@@ -24,24 +24,24 @@ variables:
   # Epic sources
   epics_location: "{output_folder}"
   epics_pattern: "epic*.md"
-  stories_location: "{sprint_artifacts}"
+  stories_location: "{implementation_artifacts}"
 
   # Chain configuration (can be overridden by user)
   chain_mode: "sequential" # sequential | parallel | dependency-aware
   analysis_depth: "standard" # quick | standard | thorough
 
   # Output locations
-  chain_plan_file: "{sprint_artifacts}/chain-plan.yaml"
-  chain_log_file: "{sprint_artifacts}/chain-execution.log"
+  chain_plan_file: "{implementation_artifacts}/chain-plan.yaml"
+  chain_log_file: "{implementation_artifacts}/chain-execution.log"
 
   # Report generation
-  chain_report_file: "{sprint_artifacts}/chain-execution-report.md"
-  metrics_folder: "{sprint_artifacts}/metrics"
+  chain_report_file: "{implementation_artifacts}/chain-execution-report.md"
+  metrics_folder: "{implementation_artifacts}/metrics"
   generate_report: true
 
   # UAT locations
   uat_location: "{output_folder}/uat"
-  handoffs_location: "{sprint_artifacts}/handoffs"
+  handoffs_location: "{implementation_artifacts}/handoffs"
 
   # Report template
   report_template: "{installed_path}/templates/chain-report-template.md"

@@ -62,8 +62,19 @@ npx bmad-method install
 When prompted to select modules, choose **BMad Method**.
 
 The installer creates two folders:
-- `_bmad/` — agents, workflows, tasks, and configuration
-- `_bmad-output/` — empty for now, but this is where your artifacts will be saved
+
+- `_bmad/` — agents, workflows, tasks, and configuration (gitignored)
+- `_bmad-output/` — where your planning and implementation artifacts are saved (gitignored)
+
+A third folder, `docs/`, is used for long-term project knowledge like research and project documentation — this folder is meant to be committed to version control. You can customize all paths during installation.
+
+:::tip[What Goes Where]
+- **`_bmad-output/planning-artifacts/`** — PRDs, architecture docs, epics (working documents)
+- **`_bmad-output/implementation-artifacts/`** — sprint status, stories, reviews (working documents)
+- **`docs/`** — finalized project knowledge, research findings (version-controlled)
+
+Both `_bmad/` and `_bmad-output/` are added to `.gitignore` by default. If you want to version-control your planning artifacts (PRDs, architecture docs), move or copy them to `docs/` when finalized.
+:::
 
 Open your AI IDE in the project folder. Run the `help` workflow (`/bmad-help`) to see what to do next — it detects what you've completed and recommends the next step.
 
@@ -165,12 +176,16 @@ Your project now has:
 
 ```text
 your-project/
-├── _bmad/                         # BMad configuration
+├── _bmad/                                        # BMad configuration (gitignored)
 ├── _bmad-output/
-│   ├── PRD.md                     # Your requirements document
-│   ├── architecture.md            # Technical decisions
-│   ├── epics/                     # Epic and story files
-│   └── sprint-status.yaml         # Sprint tracking
+│   ├── planning-artifacts/
+│   │   ├── PRD.md                                # Your requirements document
+│   │   ├── architecture.md                       # Technical decisions
+│   │   └── epics/                                # Epic and story files
+│   └── implementation-artifacts/
+│       ├── sprint-status.yaml                    # Sprint tracking
+│       └── story-*.md                            # Story files
+├── docs/                                         # Long-term project knowledge (committed)
 └── ...
 ```
 
@@ -202,6 +217,9 @@ Load the Analyst agent (`/bmad-agent-bmm-analyst`) and run `brainstorming` (`/bm
 
 **Do I need to follow a strict order?**
 Not strictly. Once you learn the flow, you can run workflows directly using the Quick Reference above.
+
+**How do I verify my installation worked?**
+Run `bmad status` in your terminal to see installed modules and versions, or run `/bmad-help` in your IDE — if it responds with workflow recommendations, everything is working.
 
 ## Getting Help
 

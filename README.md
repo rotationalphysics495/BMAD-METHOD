@@ -28,7 +28,12 @@ Traditional AI tools do the thinking for you, producing average results. BMad ag
 npx bmad-method install
 ```
 
-Follow the installer prompts, then open your AI IDE (Claude Code, Cursor, Windsurf, etc.) in the project folder.
+Follow the installer prompts. After installation, your project will have:
+
+- `_bmad/` — BMad configuration, agents, and workflows (gitignored)
+- `_bmad-output/` — where generated artifacts are saved (gitignored)
+
+Open your AI IDE (Claude Code, Cursor, Windsurf, etc.) in the project folder and run `/bmad-help` to get personalized guidance on what to do next.
 
 **Non-Interactive Installation**: For CI/CD pipelines or automated deployments, use command-line flags:
 
